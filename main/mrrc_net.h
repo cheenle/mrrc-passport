@@ -12,6 +12,18 @@
 #define MRRC_BAND_NAME_LEN 8
 #define MRRC_S_UNIT_LEN    12
 
+#define MRRC_MAX_CH 8
+
+typedef struct {
+    int32_t freq_hz;
+    char    mode[8];
+    char    label[20];
+} mrrc_chan_t;
+
+/* Channel list pushed by the server in every fullState ("memChannels"). */
+extern mrrc_chan_t g_chans[MRRC_MAX_CH];
+extern int g_chan_count;
+
 typedef struct {
     int32_t freq_hz;
     int32_t vfo_a_hz;
@@ -45,6 +57,11 @@ void mrrc_net_set_af_gain(int gain);
 /* Keying.  The server force-releases a session that stops sending {"type":
  * "txhb"} for 5 s, so the TX task must heartbeat every 1.5 s. */
 void mrrc_net_set_ptt(bool on);
+
+/* Jump to a stored channel: frequency and mode together. */
+void mrrc_net_set_chan(int index);
+/* Cycle to the next working mode (LSB -> USB -> CW-U -> ...). */
+void mrrc_net_next_mode(void);
 
 /* Single-connection mode: /WSterminal carries control JSON, downlink audio and
  * uplink audio on one socket.  Binary on this socket is audio. */

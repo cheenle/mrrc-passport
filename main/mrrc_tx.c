@@ -121,12 +121,13 @@ static bool __attribute__((unused)) tx_open_unused(void)
 static void tx_task(void *arg)
 {
     (void)arg;
-    static int16_t mic[TX_MIC_FRAME];
-    static int16_t up[TX_FRAME];
-    /* /WSterminal uplink framing: [0x01][payload].  The server routes 0x01
-     * frames from the owning socket into _feed_tx_from_uplink(). */
-    static uint8_t frame[1 + sizeof up];
-    frame[0] = 0x01;
+    /* One buffer for the whole path: byte 0 is the codec tag, samples 1..960
+     * hold the 48 kHz stream.  The 320 captured samples are expanded to 960
+     * from the back so they are never overwritten. */
+    static int16_t buf[1 + TX_FRAME];
+    uint8_t *tag = (uint8_t *)buf;
+    int16_t *pcm = buf + 1;
+    *tag = 0x01;
 
     int64_t last_hb = 0;
     const int64_t started = esp_timer_get_time();
@@ -144,7 +145,7 @@ static void tx_task(void *arg)
             break;
         }
 
-        if (bsp_audio_read(mic, sizeof mic) != ESP_OK) {
+        if (bsp_audio_read(pcm, TX_MIC_FRAME * sizeof(int16_t)) != ESP_OK) {
             s_read_fail++;
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
@@ -153,7 +154,7 @@ static void tx_task(void *arg)
         int pk = 0;
         long sum = 0;
         for (int i = 0; i < TX_MIC_FRAME; i++) {
-            const int a = mic[i] < 0 ? -mic[i] : mic[i];
+            const int a = pcm[i] < 0 ? -pcm[i] : pcm[i];
             if (a > pk) pk = a;
             sum += a;
         }
@@ -161,13 +162,15 @@ static void tx_task(void *arg)
         s_peak_avg_sum += (int)(sum / TX_MIC_FRAME);
         s_peak_avg_n++;
 
-        /* 16 kHz -> 48 kHz by zero-order hold; the server resamples to 44.1 kHz
-         * anyway and the passband is 3 kHz. */
-        for (int i = 0; i < TX_MIC_FRAME; i++)
-            up[i * 3] = up[i * 3 + 1] = up[i * 3 + 2] = mic[i];
-        memcpy(frame + 1, up, sizeof up);
+        /* 16 kHz -> 48 kHz by zero-order hold, expanded from the back. */
+        for (int i = TX_MIC_FRAME - 1; i >= 0; i--) {
+            const int16_t v = pcm[i];
+            pcm[i * 3] = pcm[i * 3 + 1] = pcm[i * 3 + 2] = v;
+        }
+        /* /WSterminal uplink: single layer [0x01][PCM]. */
+        *tag = 0x01;
 
-        if (mrrc_net_send_bin(frame, sizeof frame)) {
+        if (mrrc_net_send_bin(buf, 1 + TX_FRAME * sizeof(int16_t))) {
             s_tx_frames++;
         } else {
             s_send_fail++;

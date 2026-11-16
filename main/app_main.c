@@ -78,9 +78,19 @@ static void vol_store(void)
 
 /* One step of whichever knob is active.  Shared by the single click and the
  * auto-repeat so both behave identically. */
+static int s_chan_idx;
+
 static void knob_step(bsp_btn_t btn)
 {
     const int dir = (btn == BSP_BTN_UP) ? +1 : -1;
+
+    if (s_ui_mode == UI_MODE_CHANNEL) {
+        if (g_chan_count <= 0) { mrrc_ui_set_toast("no channels"); return; }
+        s_chan_idx = (s_chan_idx + dir + g_chan_count) % g_chan_count;
+        mrrc_net_set_chan(s_chan_idx);
+        mrrc_ui_set_toast(g_chans[s_chan_idx].label);
+        return;
+    }
 
     if (s_ui_mode == UI_MODE_VOL) {
         s_spk_vol += dir * SPK_STEP;
@@ -134,6 +144,13 @@ static void keys_task(void *arg)
      * tap falls into that hole and no CLICK ever arrives.  Measure the press
      * ourselves from PRESS/RELEASE instead. */
     int64_t ok_press_us = 0;
+    /* Double/triple tap arbitration: a tap increments the counter and pushes a
+     * 600 ms deadline.  The double-tap action fires only when that deadline
+     * expires without a third tap, so triple-tap is unambiguous — at the cost
+     * of 600 ms of latency on the double tap. */
+    int tap_count = 0;
+    int64_t tap_deadline = 0;
+    int chan_idx = 0;
     bsp_btn_t repeat_btn = BSP_BTN_UP;
     int64_t repeat_at = 0;
 
@@ -142,12 +159,25 @@ static void keys_task(void *arg)
         if (repeat) {
             const int64_t left = repeat_at - esp_timer_get_time();
             wait = left <= 0 ? 0 : pdMS_TO_TICKS((left + 999) / 1000);
+        } else if (tap_deadline) {
+            wait = pdMS_TO_TICKS(50);   /* poll so the tap window can expire */
         }
 
         if (xQueueReceive(s_key_q, &e, wait) != pdTRUE) {
             if (repeat) {
                 knob_step(repeat_btn);
                 repeat_at = esp_timer_get_time() + 120000;
+            }
+            if (tap_count == 2 && tap_deadline && esp_timer_get_time() > tap_deadline) {
+                tap_count = 0;
+                tap_deadline = 0;
+                /* Double tap: FREQ -> CHANNEL -> VOL -> FREQ */
+                s_ui_mode = (ui_mode_t)((s_ui_mode + 1) % 3);
+                mrrc_ui_set_mode(s_ui_mode, s_spk_vol);
+                const char *nm = s_ui_mode == UI_MODE_CHANNEL ? "CH"
+                               : (s_ui_mode == UI_MODE_VOL ? "VOL" : "FREQ");
+                mrrc_ui_set_toast(nm);
+                ESP_LOGI(TAG, "mode -> %s", nm);
             }
             continue;
         }
@@ -209,17 +239,18 @@ static void keys_task(void *arg)
             const int64_t held = ok_press_us ? now - ok_press_us : 0;
             ok_press_us = 0;
             if (held > 0 && held < 500000) {          /* a tap, not a keying */
-                if (ok_click_us && now - ok_click_us < 2000000) {   /* 2 s */
-                    ok_click_us = 0;
-                    s_ui_mode = (s_ui_mode == UI_MODE_FREQ) ? UI_MODE_VOL : UI_MODE_FREQ;
-                    mrrc_ui_set_mode(s_ui_mode, s_spk_vol);
-                    mrrc_ui_set_toast(s_ui_mode == UI_MODE_VOL ? "VOL: speaker"
-                                                               : "FREQ: tuning");
-                    ESP_LOGI(TAG, "mode -> %s (spk %d%%)",
-                             s_ui_mode == UI_MODE_VOL ? "VOL" : "FREQ", s_spk_vol);
+                if (now < tap_deadline) {
+                    tap_count++;
                 } else {
-                    ok_click_us = now;
-                    ESP_LOGI(TAG, "OK tap 1/2 held=%lld ms", (long long)(held / 1000));
+                    tap_count = 1;
+                }
+                tap_deadline = now + 600000;          /* 600 ms to add a tap */
+                ok_click_us = now;
+                if (tap_count == 3) {                 /* triple: cycle mode */
+                    tap_count = 0;
+                    tap_deadline = 0;
+                    mrrc_net_next_mode();
+                    mrrc_ui_set_toast("MODE");
                 }
             }
             continue;

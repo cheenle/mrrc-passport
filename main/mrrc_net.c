@@ -31,6 +31,7 @@
 #include "freertos/task.h"
 #include "mrrc_audio.h"
 #include "mrrc_net.h"
+#include "mrrc_ui.h"
 #include "nvs.h"
 
 static const char *TAG = "net";
@@ -41,9 +42,11 @@ static const char *TAG = "net";
 #define TOKEN_MAX      256
 /* /WSradio fullState measures ~5.5 KB and arrives split across WS buffer
  * chunks; accumulate by payload_offset before parsing. */
-#define WS_FRAME_MAX   8192
+#define WS_FRAME_MAX   6144   /* fullState measured 5662 B */
 
 mrrc_state_t g_radio;
+mrrc_chan_t g_chans[MRRC_MAX_CH];
+int g_chan_count;
 
 static SemaphoreHandle_t s_lock;
 static char s_token[TOKEN_MAX];
@@ -143,6 +146,24 @@ static void handle_ctrl_text(const char *payload, int len)
     mrrc_state_lock();
     if (!strcmp(t, "fullState")) {
         apply_object(cJSON_GetObjectItem(root, "data"), &bump);
+        /* "memChannels": [{freq, mode, label}, ...] for the CHANNEL knob. */
+        const cJSON *chans = cJSON_GetObjectItem(root, "memChannels");
+        if (cJSON_IsArray(chans)) {
+            g_chan_count = 0;
+            for (const cJSON *it = chans->child;
+                 it && g_chan_count < MRRC_MAX_CH; it = it->next) {
+                const cJSON *f = cJSON_GetObjectItem(it, "freq");
+                const cJSON *m = cJSON_GetObjectItem(it, "mode");
+                const cJSON *l = cJSON_GetObjectItem(it, "label");
+                if (!cJSON_IsNumber(f)) continue;
+                mrrc_chan_t *c = &g_chans[g_chan_count++];
+                c->freq_hz = (int32_t)f->valuedouble;
+                snprintf(c->mode, sizeof c->mode, "%s",
+                         cJSON_IsString(m) ? m->valuestring : "");
+                snprintf(c->label, sizeof c->label, "%s",
+                         cJSON_IsString(l) ? l->valuestring : "");
+            }
+        }
         bump |= 1;
     } else if (!strcmp(t, "stateUpdate")) {
         cJSON *fields = cJSON_GetObjectItem(root, "fields");
@@ -181,6 +202,11 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "/WSterminal connected");
         s_ctrl_up = true;
+        /* mid profile: 850 bins, 851-byte payloads — small enough to parse on
+         * this chip and detailed enough for a 240-px scope. */
+        esp_websocket_client_send_text(s_ws, "{\"type\":\"spectrumCaps\",\"profile\":\"mid\"}",
+                                       (int)strlen("{\"type\":\"spectrumCaps\",\"profile\":\"mid\"}"),
+                                       pdMS_TO_TICKS(500));
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "/WSterminal disconnected");
@@ -193,8 +219,16 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
          * exactly once at the end.  Parsing a chunk yields "bad JSON (4096 B)". */
         /* Binary frames on this socket are downlink audio. */
         if (ev->op_code == 0x02) {
-            if (ev->data_ptr && ev->data_len > 1)
+            if (!ev->data_ptr || ev->data_len <= 0) break;
+            /* Two kinds of binary share this socket: 852-byte spectrum frames
+             * ([0x02][0x01] + 850 bins) and ~130-byte audio frames
+             * ([0x00][0x01] + Opus). */
+            if (ev->data_len >= 852) {
+                mrrc_ui_spectrum((const uint8_t *)ev->data_ptr + 2,
+                                 (size_t)ev->data_len - 2);
+            } else {
                 mrrc_audio_feed((const uint8_t *)ev->data_ptr, (size_t)ev->data_len);
+            }
             break;
         }
         if (ev->op_code != 0x01 || ev->payload_len <= 0 || !ev->data_ptr) break;
@@ -240,6 +274,37 @@ void mrrc_net_set_ptt(bool on)
              on ? "true" : "false");
     ws_send_text(msg);
     ESP_LOGI(TAG, "PTT %s", on ? "ON" : "OFF");
+}
+
+void mrrc_net_set_chan(int index)
+{
+    if (index < 0 || index >= g_chan_count) return;
+    const mrrc_chan_t *c = &g_chans[index];
+    mrrc_net_set_freq(c->freq_hz);
+    if (c->mode[0]) {
+        char msg[64];
+        snprintf(msg, sizeof msg,
+                 "{\"type\":\"set\",\"field\":\"mode\",\"value\":\"%s\"}", c->mode);
+        ws_send_text(msg);
+    }
+    ESP_LOGI(TAG, "chan %d -> %ld %s", index, (long)c->freq_hz, c->mode);
+}
+
+void mrrc_net_next_mode(void)
+{
+    static const char *MODES[] = {"LSB", "USB", "CW-U", "AM", "FM", "RTTY-L", "DATA-L"};
+    const int n = sizeof MODES / sizeof MODES[0];
+    int cur = 0;
+    mrrc_state_lock();
+    for (int i = 0; i < n; i++)
+        if (!strcmp(g_radio.mode_name, MODES[i])) { cur = i; break; }
+    mrrc_state_unlock();
+    const char *next = MODES[(cur + 1) % n];
+    char msg[64];
+    snprintf(msg, sizeof msg,
+             "{\"type\":\"set\",\"field\":\"mode\",\"value\":\"%s\"}", next);
+    ws_send_text(msg);
+    ESP_LOGI(TAG, "mode -> %s", next);
 }
 
 void mrrc_net_send_txhb(void) { ws_send_text("{\"type\":\"txhb\"}"); }
@@ -341,9 +406,25 @@ static bool mrrc_login(void)
 
 /* ── Wi-Fi + supervisor ──────────────────────────────────────────────── */
 
+static esp_netif_t *s_sta_netif;
 static EventGroupHandle_t s_net_ev;
 #define NET_UP   BIT0
 #define NET_FAIL BIT1
+
+/* Print every IPv6 address the interface holds (link-local included).  No
+ * fe80:: means the stack never came up; fe80:: without a global address means
+ * the router's Router Advertisements are not being accepted. */
+static void dump_ipv6(const char *when)
+{
+    if (!s_sta_netif) return;
+    esp_ip6_addr_t v6[3];
+    const int n = esp_netif_get_all_ip6(s_sta_netif, v6);
+    ESP_LOGW(TAG, "%s: %d IPv6 address(es)", when, n);
+    for (int i = 0; i < n; i++)
+        ESP_LOGW(TAG, "  ipv6[%d] %08x:%08x:%08x:%08x zone=%d", i,
+                 (unsigned)v6[i].addr[0], (unsigned)v6[i].addr[1],
+                 (unsigned)v6[i].addr[2], (unsigned)v6[i].addr[3], v6[i].zone);
+}
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -357,9 +438,20 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *ip = (const ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "ip " IPSTR, IP2STR(&ip->ip_info.ip));
+#if CONFIG_LWIP_IPV6
+        /* The interface must be UP before a link-local address can be
+         * derived; calling this at create time silently does nothing.
+         * SLAAC then follows from CONFIG_LWIP_IPV6_AUTOCONFIG once the router
+         * sends a Router Advertisement. */
+        esp_err_t e6 = esp_netif_create_ip6_linklocal(s_sta_netif);
+        ESP_LOGW(TAG, "ip6 linklocal: %s", esp_err_to_name(e6));
+#endif
+        dump_ipv6("after IPv4");
         xEventGroupSetBits(s_net_ev, NET_UP);
     }
 }
+
+
 
 static bool wifi_up(void)
 {
@@ -370,7 +462,7 @@ static bool wifi_up(void)
     s_net_ev = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    s_sta_netif = esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init));
@@ -389,8 +481,14 @@ static bool wifi_up(void)
      * 100 ms+ and bursts the downlink.  Cost is idle current. */
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
-    return (xEventGroupWaitBits(s_net_ev, NET_UP, pdFALSE, pdFALSE,
-                                pdMS_TO_TICKS(25000)) & NET_UP) != 0;
+    const bool up = (xEventGroupWaitBits(s_net_ev, NET_UP, pdFALSE, pdFALSE,
+                                         pdMS_TO_TICKS(25000)) & NET_UP) != 0;
+    if (up) {
+        /* SLAAC completes on the next RA, usually within a few seconds. */
+        vTaskDelay(pdMS_TO_TICKS(6000));
+        dump_ipv6("6 s after IPv4");
+    }
+    return up;
 }
 
 static void start_ws(void)

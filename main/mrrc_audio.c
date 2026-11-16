@@ -30,11 +30,10 @@
 static const char *TAG = "audio";
 
 #define AUD_WS_STACK   6144
-#define AUD_TASK_STACK 12288   /* -O2 inlines deeply: 8 KB overflowed */
+#define AUD_TASK_STACK 8192
 #define AUD_RB_BYTES   4096         /* ~0.8 s of 64 kbps Opus */
 #define AUD_FRAME_MAX  576          /* 60 ms @ 48 kHz mono Opus is < 200 B */
 #define AUD_PCM48_MAX  2880         /* 60 ms @ 48 kHz: what Opus decodes to */
-#define AUD_PCM16_MAX   960         /* 60 ms @ 16 kHz: what the codec plays */
 
 /* The codec runs at 16 kHz, not 48 kHz.  Measured on this board: the ES8311
  * ADC delivers ~468 peak at 48 kHz and ~12708 at 16 kHz for the same speech —
@@ -52,7 +51,6 @@ static volatile bool s_muted;
 static int s_feed_dbg;    /* first few frames: what do the bytes look like? */   /* downlink muted while transmitting */
 static int64_t  s_dec_us;      /* accumulated opus_decode time */
 static int16_t  s_pcm48[AUD_PCM48_MAX];
-static int16_t  s_pcm16[AUD_PCM16_MAX];
 
 /* ── jitter buffer ───────────────────────────────────────────────────── */
 
@@ -149,18 +147,17 @@ static void audio_task(void *arg)
         /* Half duplex: drop playback while the transmitter is keyed.  Feeding
          * our own uplink back through the speaker is a howl, not audio. */
         if (s_muted || mrrc_tx_active()) continue;
-        /* 48 kHz -> 16 kHz.  A 3-tap average is both the decimation filter
-         * and a cheap anti-alias; the SSB passband is 3 kHz, so nothing above
-         * 8 kHz matters. */
+        /* 48 kHz -> 16 kHz in place: a 3-tap average is both the decimation
+         * filter and a cheap anti-alias (SSB passband is 3 kHz).  The write
+         * index always trails the read index, so no second buffer is needed. */
         int out = 0;
         for (int i = 0; i + 2 < got; i += 3) {
-            const int32_t v = (s_pcm48[i] + s_pcm48[i + 1] + s_pcm48[i + 2]) / 3;
-            s_pcm16[out++] = (int16_t)v;
+            s_pcm48[out++] = (int16_t)((s_pcm48[i] + s_pcm48[i + 1] + s_pcm48[i + 2]) / 3);
         }
         if (out <= 0) continue;
         /* Blocking on the I2S DMA is what paces this loop; the codec's
          * auto_clear_after_cb fills silence when we are late. */
-        if (bsp_audio_write(s_pcm16, (size_t)out * sizeof(int16_t)) != ESP_OK)
+        if (bsp_audio_write(s_pcm48, (size_t)out * sizeof(int16_t)) != ESP_OK)
             s_errors++;
     }
 }

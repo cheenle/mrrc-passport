@@ -2,6 +2,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Builds the screen and starts the refresh task.  Must be called after
@@ -10,8 +11,12 @@ void mrrc_ui_start(void);
 
 /* Which knob the UP/DOWN keys drive.  The badge in the top bar is the only
  * place this is visible, so it has to be obvious at a glance. */
-typedef enum { UI_MODE_FREQ = 0, UI_MODE_VOL = 1 } ui_mode_t;
+typedef enum { UI_MODE_FREQ = 0, UI_MODE_CHANNEL = 1, UI_MODE_VOL = 2 } ui_mode_t;
 void mrrc_ui_set_mode(ui_mode_t mode, int volume_pct);
+
+/* 850 raw bins, one per column after downsampling.  Called from the WebSocket
+ * task, so it must not touch LVGL directly — it only publishes the data. */
+void mrrc_ui_spectrum(const uint8_t *bins, size_t n);
 
 /* Local status the UI shows but the server knows nothing about. */
 void mrrc_ui_set_battery(int percent, bool charging);
