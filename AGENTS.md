@@ -1,97 +1,81 @@
-<p align="right">
-  <a href="AGENTS.zh_CN.md">简体中文</a> · <strong>English</strong>
-</p>
+# MRRC 终端 — 仓库规范
 
-# Repository Guidelines for AI Agents
+本仓是**我们自己**的固件，`components/bsp/` 与 `docs/` 的大部分内容来自
+`ref/ai-passport`（FoloToy 开源基线）。上游那份 `AGENTS.md`（要求安装 5 个
+passport skill、规定 LVGL 二次开发流程）**不适用于本项目**，已替换为本文。
 
-This file is the only mandatory entry point for AI-assisted work in this repository. Read task-specific documents from the routing table below; do not load every README by default.
+## 先读什么
 
-## Required AI skills
+| 任务 | 必读 |
+|---|---|
+| 任何改动 | `docs/design-v1.md`（硬件事实、实测数据、全部踩过的坑） |
+| 音频相关 | 本文 §1，以及 `docs/design-v1.md` §3.1 / §6 |
+| 内存相关 | `docs/design-v1.md` §4、§13 |
+| 引脚与器件 | `components/bsp/include/bsp_pins.h`（单一事实来源） |
 
-The following five skills are required for AI-assisted development in this repository:
-`passport-develop`, `passport-setup`, `passport-build`, `passport-device-test`, and
-`passport-debug`. Their maintained sources are under `skills/`.
+## §1 不可改动的约束
 
-Before starting development, the AI must check that all five are installed and
-available in its current environment. If any are missing, the AI must choose an
-appropriate installation method for its tool and environment, perform the
-installation, and verify availability itself. Do not wait for the user to request
-installation or make the user choose the method or run installation commands.
-No particular script, installation directory, or AI client is mandatory.
+这四条都是实测撞出来的，改了就会退回到已经踩过的坑：
 
-Respect the environment's approval requirements and preserve existing skills
-and user configuration. If permissions, conflicts, or platform limitations prevent
-installation, explain the blocker and request only the necessary user action;
-do not claim installation succeeded. Having all five available does not mean
-loading or invoking all five for every task: use only the matching skills, and
-retain the separate authorization requirements for flashing, Git writes, and publishing.
+1. **codec 固定 16 kHz**。ES8311 在 48 kHz 采集近乎失聪（峰值 468 vs 12708）。
+   服务端要 48 kHz，靠软件重采样对接，不要在运行期切 `bsp_audio_set_format`。
+2. **micro-opus 必须打补丁**：`tools/patch_microopus.sh`。pseudostack 要 16 KB
+   （Kconfig 默认下限 60 KB 装不下），并且必须用 `NONTHREADSAFE`——RISC-V GCC
+   不生成 `.tbss`，线程安全模式会把 NULL 写进 `celt_decoder`。
+3. **LVGL 绘制缓冲保持 8 行**（`bsp_display_lvgl.c`）。40 行会吃掉 19 KB，
+   让 Opus 没有内存可用。
+4. **PTT 顺序**：先连 `/WSaudioTX` 并等它 accepted，再发 `ptt:true`。
+   反过来服务端会把上行音频判成 non-owner 全部丢弃（电台 key 了但没调制）。
 
-## Project and safety baseline
+## §2 事实优先级
 
-- Target: ESP32-C3, 8 MB Flash, no PSRAM, ESP-IDF 5.5.3.
-- Keep the repository's default partition table minimal: NVS, PHY data, and
-  one factory application spanning the rest of the 8 MB Flash. User firmware
-  may deliberately change this layout; validate the resulting table and do not
-  turn product-specific partitions into mandatory template contracts.
-- Preserve existing user changes. Start with `git status --short --branch`; never overwrite or clean unrelated files.
-- Flashing new firmware does not require backing up the firmware already on the device; do not make a Flash readback a prerequisite. This does not guarantee preservation of user data or authorize a full-chip erase. Follow the [flashing and data policy](docs/development/engineering/firmware-layout.md#flashing-and-stored-data).
-- Hardware facts follow this priority: product specifications and measured results → `components/bsp/include/bsp_pins.h` → BSP headers and implementation → hardware guide → README/demo code. If a task requires a hardware detail not defined by these sources, ask the user instead of guessing.
-- Reusable board logic belongs in `components/bsp`; pages, state machines, animations, and application tasks belong in `main`.
-- Derivative applications must redesign and implement their own UI. Reusing the current demo test menu, screens, or visual shell is prohibited; renaming, recoloring, or adding a feature to that shell does not count as a redesign. BSP APIs and non-UI logic remain reusable. See the [mandatory UI redesign rule](docs/development/ai-guide.md#mandatory-ui-redesign-for-derivative-applications).
-- LVGL is not thread-safe. Code outside the LVGL task must hold `bsp_lvgl_lock()` while accessing LVGL objects.
-- Before adding Chinese UI text, follow the [font checklist](docs/development/engineering/coding-conventions.md#chinese-fonts-and-missing-glyphs). The default Montserrat fonts have no Chinese glyphs; UTF-8 and a successful build do not prove display support. Verify glyph coverage, widget font selection, and on-device rendering.
-- Button callbacks must stay non-blocking. Audio, storage, networking, and other slow operations belong in worker tasks.
-- A demo must stop every task, timer, callback, and event handler that can access its UI before deleting the screen.
-- Keep testable state machines, protocols, timing, and layout calculations independent from ESP-IDF/LVGL and cover them with host tests.
-- Never commit credentials, device QR secrets, private keys, personal data, or unsanitized logs.
-- Every maintained Markdown document outside the root README set uses English at its default `.md` path and Simplified Chinese in a paired `.zh_CN.md` file. Keep both versions aligned and retain reciprocal language links. This includes other root Markdown such as `AGENTS.md`. Root README files are exempt: `README.md` may use any language, and any number of `README.<tag>.md` versions may coexist; when multiple versions exist, keep every language link valid and reciprocal.
-- Root README scope follows the branch model. The `main` README catalogs the applications hosted on other branches; when development happens directly on `main`, it describes `main`'s own functionality instead. Every other branch's root README describes only that branch's application and must not list or advertise other branches' applications.
+实测 > `bsp_pins.h` > BSP 实现 > 上游文档 > 猜测。
 
-## Task-specific context routing
+**不允许把推测写成结论**。S3 期间我曾用一段含两次断连的日志推算吞吐，得出
+「TLS 只有 104 kbit/s，必须上 Opus」的错误结论，白做了一整套方案。凡是用来
+支撑架构决定的数字，必须说明它是在什么条件下测的——`docs/design-v1.md` §13
+和 §9.3 里记着这条教训。
 
-| Task | Read before editing |
-| --- | --- |
-| Any code change | `docs/development/ai-guide.md`, relevant headers and neighboring implementation |
-| Application workflow or core skill setup | `skills/README.md`; ensure the five required skills are available, then use only the matching skill |
-| Environment bootstrap or missing toolchain | `docs/development/engineering/environment-setup.md` |
-| BSP, pins, buses, display, audio, battery | `docs/hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.md`, `components/bsp/include/bsp_pins.h` |
-| Demo or menu | `main/demo.h`, `main/main.c`, the nearest `main/demo_*.c` implementation |
-| Chinese UI text or fonts | `docs/development/engineering/lvgl-chinese-fonts.md`, the application's font assets, configuration, and widget styles |
-| Wi-Fi connection or Bluetooth provisioning | `docs/development/engineering/wifi-provisioning.md`, the referenced `demo/blufi-provisioning` implementation |
-| Build, test, dependencies, partitions | `docs/development/engineering/build-and-test.md`, `docs/development/engineering/firmware-layout.md`, `sdkconfig.defaults`, `partitions.csv` |
-| CI or release | the matching file in `docs/development/ci/CI-*.md` and `.github/workflows/` |
-| Project completion | `docs/development/release/project-completion.md` (then the `issue-suggestions` or `experience-pr` skill) |
-| Documentation | `docs/contribution/doc-conventions.md`, `docs/README.md` |
-| Commit or PR | `docs/contribution/commit-and-pr.md` |
-
-Use `docs/README.md` for the product overview and the documentation index. For the detailed AI development workflow — context setup, source-of-truth priority, application/BSP boundary, runtime invariants, material placement, and delivery format — read `docs/development/ai-guide.md`. Fork-specific workflow is in `docs/fork-guide.md` and is not required for ordinary upstream development.
-
-## Required validation and delivery
-
-Run the smallest relevant check while iterating, then run the complete gate before delivery:
+## §3 构建与烧录
 
 ```bash
-./tools/validate.sh --static    # repository checks + host tests
-./tools/validate.sh --firmware  # ESP-IDF build + merged-image verification
-./tools/validate.sh             # complete gate
+./tools/build_on_mac.sh           # mac-mini 构建并取回产物
+./tools/flash_probe.sh            # 备份原厂固件（首次）→ 验芯片 → 烧 → 读日志
+./tools/flash_probe.sh --log-only # 只读日志
 ```
 
-The complete gate requires an activated ESP-IDF 5.5.3 environment. Do not describe a successful build as hardware validation. Final delivery must report these fields separately:
+- 构建依赖 ESP-IDF 5.4.2（`idf_component.yml` 已放宽到 `>=5.4.2,<6.0.0`）。
+- **烧录前必须确认芯片是 ESP32-C3**。`flash_probe.sh` 会验；手工烧录时也必须验，
+  把 S3 的镜像写进 C3 会直接变砖。
+- 原厂 8 MB 固件备份在 `~/aipassport-factory-8MB.bin`，回退用
+  `esptool write_flash 0x0 <backup>`。
 
-```text
-Build: PASS / FAIL / NOT RUN
-Host tests: PASS / FAIL / NOT RUN
-Device tests: PASS / FAIL / NOT RUN
-Unverified: remaining board, instrument, or user checks
+## §4 凭据
+
+Wi-Fi、服务端地址与密码只写在本地 `sdkconfig`（`idf.py menuconfig` → MRRC Terminal）。
+`build_on_mac.sh` 不同步 `sdkconfig`，`.gitignore` 也已排除。**不要写进
+`sdkconfig.defaults` 或任何入库文件**。
+
+## §5 改动验收
+
+| 改动类型 | 必须验证 |
+|---|---|
+| 音频路径 | 接收 `err=0 drop=0`；PTT 一次，对方能听清 |
+| 网络/协议 | `/WSradio` + `/WSaudioRX` 都 connected，`freq` 非零 |
+| 内存相关 | idle 打印的 `free / largest` 不比改动前差，`largest` 不低于 8 KB |
+| 任何改动 | 串口无 `Guru Meditation`、无 `task_wdt` |
+
+诊断数据一律从串口 60 秒一条的 idle 行读，不要靠猜：
+
+```
+mem: free=..K largest=..K min=..K dma_free=..K
+stack: audio min free=.. B
+tx: keys=.. fails=.. frames=.. sendfail=.. readfail=.. linkdowns=.. last=..
 ```
 
-After each complete implementation of a user-requested firmware change,
-proactively ask whether to flash it to the device for testing; do not wait for
-a release request. If no device is detected, ask the user to turn it on and
-connect it to a computer USB port with a data-capable cable. Follow the
-[on-device testing handoff](docs/development/ai-guide.md#offer-on-device-testing)
-and obtain approval before flashing; detection alone is not consent.
+## §6 已知未完成
 
-Create commits and push only when the user requests them or the active workflow explicitly requires them. Ordinary feature, application, and documentation pull requests must not edit `docs/CHANGELOG.md` or `docs/CHANGELOG.zh_CN.md`; describe user-visible behavior, compatibility, and release-flow impact in the pull-request body and authoritative documentation instead. During release preparation, the release maintainer aggregates merged user-visible changes into both changelog files before creating the tag.
-
-Community guidance is in `.github/CONTRIBUTING.md`, `.github/CODE_OF_CONDUCT.md`, `.github/SECURITY.md`, and `.github/SUPPORT.md`.
+- `largest` 只有约 10 KB（`fullState` 的 5.5 KB JSON 反复 malloc/free 导致碎片）。
+- VOL 档切换、UP/DOWN 长按连发未实现。
+- 频谱/瀑布未做（内存与连接数都不够）。
+- 30 分钟连续收听 + 10 次 PTT 的稳定性未验证。

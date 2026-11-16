@@ -30,16 +30,26 @@
 
 这四条决定了架构，不能绕。
 
-### 3.1 全双工共享时钟 → 收发必须同采样率
+### 3.1 全双工共享时钟 → 收发只能同一个采样率，而 48 kHz 采集是死的
 
-ES8311 的 MCLK/BCLK/WS 由 I2S0 的 TX 和 RX 共用。物理上不存在"收 48 kHz、发 16 kHz"。
+ES8311 的 MCLK/BCLK/WS 由 I2S0 的 TX 和 RX 共用，物理上不存在"收 48 kHz、发 16 kHz"。
 
-**决定**：codec 固定 **48 kHz**，永不切换。麦克风数据在软件里降采样到 16 kHz 再编码。
+但**实测把这颗芯片的 48 kHz 采集判死了**：同一段采集代码、同一颗麦克风，只改 codec 采样率：
 
-理由：
-- 下行是服务端 48 kHz Opus，必须原样解码播出；
-- 上行 Opus 16 kHz 已经够（SSB 音频带宽 3 kHz），且 C3 上省算力；
-- `bsp_audio_set_format()` 会 `delete codec → create codec → 重配 I2S`，运行期调它就是一次可听的爆音加几十毫秒断流。**PTT 按下时切换格式是不可接受的**。
+| codec 采样率 | PCM 峰值（满量程 32767） |
+|---|---|
+| 48 000 Hz | **468** |
+| 16 000 Hz | **12 708** |
+
+差 27 倍。`ref/ai-passport` 的音频 demo 全程只用 16 kHz，48 kHz 采集从未被验证过。
+
+**决定**：codec 固定 **16 kHz**，永不切换。服务端要求 48 kHz，两侧靠软件重采样对接：
+
+- 下行：Opus 解码出 48 kHz → 3:1 抽取（三点平均，兼作抗混叠）→ 16 kHz 播放
+- 上行：麦克风 16 kHz → 3:1 零阶保持 → 48 kHz PCM（服务端自己再重采样到 44.1 kHz）
+
+另一条纪律：**运行期不要调 `bsp_audio_set_format`**。它会 delete codec → 重建 → 重配 I2S，
+中间是一次可听的爆音加几十毫秒断流。
 
 ### 3.2 无 APLL → 时钟有约 0.16% 误差
 
@@ -112,15 +122,18 @@ pseudostack 在 0.4.1 里是**懒分配的堆块**（`heap_caps_malloc_prefer`�
 按 12 KB/连接算：两条常驻 TLS = 24 KB，三条 = 36 KB，在 136 KB 稳态里都能容下。
 **原设计里"为省 TLS 而让发射通道按需连接"的优化可以保留，但不再是为了活命，而是为了峰值余地。**
 
-### 4.3 待实测（S0 的产出）
+### 4.3 最终稳态（S3 完成后）
 
-`main/app_main.c` 按顺序打点，每一步打印 `free / largest / min`：
+三通道同时在线（`/WSradio` + `/WSaudioRX`，PTT 时 `/WSaudioTX` 替换下行）：
 
-```
-boot → display+lvgl → buttons → audio init → codec open → battery → wifi up → after tls → opus decoder
-```
+| 场景 | free | largest | 备注 |
+|---|---:|---:|---|
+| 静默收听 | ~33 KB | ~10 KB | `min` 曾触到 5 KB |
+| PTT 期间 | ~15 KB | ~7 KB | 零余量，靠"发射时暂停下行"腾出空间 |
+| 松手后 | ~47 KB | — | 下行重连前 |
 
-`largest` 是关键指标：free heap 够但最大连续块不够，16 KB 的 pseudostack 照样分配失败。
+`largest` 才是瓶颈：TLS 握手要 16 KB 连续块，现在靠多块拼接完成，这正是偶发
+`linkdowns` 的来源。详细分析见 §13。
 
 ## 5. 软件架构
 
@@ -149,27 +162,28 @@ components/bsp/  原样复用：i2c / display / audio / button / battery（不�
 
 ## 6. 音频设计
 
-### 6.1 数据流
+### 6.1 数据流（最终形态）
 
 ```
-收：WS(Opus 48k) → opus_decode → I2S TX → ES8311 DAC → 喇叭
-发：ES8311 ADC → I2S RX(48k) → 3:1 抽取(48k→16k) → opus_encode(16k) → WS
+收：/WSaudioRX (Opus 48k) → opus_decode → 48k PCM → 3:1 抽取 → 16k → I2S TX → ES8311 DAC → 喇叭
+发：ES8311 ADC → I2S RX 16k → 3:1 零阶保持 → 48k PCM → tag 0x00 → /WSaudioTX
 ```
 
-抽取用最简单的 3 取 1 加一阶低通即可；48k 到 16k 只需要滤掉 8 kHz 以上，C3 上不构成负担。
+上行为什么是裸 PCM 而不是 Opus：`server.py` 的 `AudioHandler.feed_tx_audio()` 明确写着
+"Input is 48 kHz Int16 PCM (from Opus decoder or browser)"，服务端自己重采样到 44.1 kHz。
+codec 本来就在 16 kHz，升采样比编码便宜，还省掉编码器 15 KB 与编码用的 pseudostack
+（16 kHz 编码实测需要 24 KB，这块板没有）。
 
-### 6.2 Opus 参数（沿用 xz-02 的实测值）
+### 6.2 Opus 参数
+
+只解码，上行是 PCM：
 
 ```c
-opus_encoder_create(16000, 1, OPUS_APPLICATION_AUDIO, &err);
-OPUS_SET_BITRATE(16000);
-OPUS_SET_COMPLEXITY(0);
-OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE);
-OPUS_SET_INBAND_FEC(1);
-OPUS_SET_PACKET_LOSS_PERC(10);
+opus_decoder_create(48000, 1, &err);
 ```
 
-帧长 60 ms（960 样本 @16k），与 xz-02 一致——服务端已验证接受这个节奏。
+pseudostack 16 000（host 实测：解码 8 KB 溢出、16 KB 有 2× 余量），模式必须是
+`NONTHREADSAFE_PSEUDOSTACK` + `INTERNAL_ONLY`，见 `tools/patch_microopus.sh`。
 
 ### 6.3 麦克风增益
 
@@ -234,19 +248,16 @@ y 260..300   状态片：[FREQ] [RX/TX] [LINK]
 
 ## 9. 网络设计
 
-### 9.1 V1：用现有的两条通道
+### 9.1 通道（最终形态）
 
-服务端当前是 4 条独立 WS（`/WSradio` `/WSspectrum` `/WSaudioRX` `/WSaudioTX`，见 `mrrc_ft710/server.py:2065-2208`）。
+| 通道 | 用途 | 连接策略 |
+|---|---|---|
+| `/WSradio` | `fullState` / `stateUpdate` / `s_meter` / `set` / `ptt` / `txhb` | 常驻 |
+| `/WSaudioRX` | 下行音频 | 常驻，PTT 期间暂停（腾出一条 TLS 的空间） |
+| `/WSaudioTX` | 上行音频 | **仅 PTT 期间按需连接**，松手即断 |
 
-V1 只开 **2 条**：
-
-| 通道 | 用途 |
-|---|---|
-| `/WSradio` | `fullState` / `stateUpdate` / `s_meter` / 发 `set` `ptt` `txhb` |
-| `/WSaudioRX` | 下行 Opus |
-| `/WSaudioTX` | 上行 Opus（**只在 PTT 期间连**，省一条常驻 TLS） |
-
-发射通道按需连接，松手后关闭——这是 V1 在**不改服务端**前提下把峰值内存压下来的关键手段。
+鉴权一律走 `?token=`：`server.py` 用 `ws.query_params` 校验，**不认 Authorization header**
+（浏览器 WebSocket 无法设置 header）。两条都带可以同时兼容新旧服务端。
 
 ### 9.2 V2：单连接多路复用（需改服务端）
 
@@ -254,7 +265,7 @@ V1 只开 **2 条**：
 
 **V1 的设计不依赖它，V2 才需要。**
 
-## 9.3 实现踩到的两个坑（S1）
+### 9.3 实现踩到的坑（S1–S3）
 
 **① `MBEDTLS_SSL_IN_CONTENT_LEN` 压得太小，WebSocket 一收数据就断**
 
@@ -315,41 +326,38 @@ for tx_ws in list(audio_tx_clients):
 
 正确顺序：**先连 `/WSaudioTX` 并等它 accepted，再发 `ptt:true`**。
 
-## 9.4 通道与延迟
+## 10. 里程碑
 
-| 用途 | 通道 | 连接策略 |
+| 阶段 | 内容 | 状态 |
 |---|---|---|
-| 控制 + 状态 + S 表 | `/WSradio` | 常驻 |
-| 下行音频 | `/WSaudioRX` | 常驻（S2） |
-| 上行音频 | `/WSaudioTX` | PTT 期间按需连接（S3） |
+| **S0** | 探针固件：Wi-Fi / TLS / codec / Opus 分阶段打点 | ✅ 实测 154 KB free / 112 KB largest |
+| **S1** | `/WSradio` 控制通道 + LVGL 界面 + 调频键 | ✅ |
+| **S2** | 下行音频（Opus 48k → 3:1 抽取 → 16k → 喇叭） | ✅ `err=0 drop=0` |
+| **S3** | PTT 上行（16k 麦克风 → 3:1 升采样 → 48k PCM） | ✅ 已实测通话清晰 |
+| **S4** | 长时间稳定性、`largest` 优化、VOL 档与连发 | ⬜ |
 
+## 11. 验收标准与实测结果
 
-| 阶段 | 内容 | 退出标准 |
-|---|---|---|
-| **S0** ✅已编译 | 探针固件：分阶段打点 | 拿到 9 个阶段的 free/largest/min |
-| **S1** | 手绘 UI + 按键手势 | 屏幕能显示频率/S 表，按键响应无卡顿 |
-| **S2** | 收发音频（不含 PTT 语义） | 能听到电台声音；录一段回放能听清自己 |
-| **S3** | PTT 状态机 + 完整协议 | 完整通联一次，服务端无 `Link lost` |
-| **S4** | 优化（jitter buffer、栈、增益、必要时拆 LVGL） | 连续收听 30 分钟无丢帧、无重启 |
-
-## 11. 验收标准
-
-1. PTT 松手后 300 ms 内服务端确认收到 `ptt:false`；
-2. 连续发射 180 s 不掉线、不触发服务端活性闸门；
-3. 连续收听 30 分钟，jitter buffer 水位不单调下降（验证 0.16% 时钟误差可接受）；
-4. 空闲时 `largest free block ≥ 20 KB`（留给下次 PTT 的编码器分配）；
-5. 长按 PTT 10 秒，`glitch_count` 不增长（按键接触良好）。
+| 标准 | 结果 |
+|---|---|
+| PTT 松手后服务端收到 `ptt:false` | ✅ |
+| 连续发射不掉线、不触发活性闸门 | ✅ 多次键控 `downs=0` |
+| 通话可懂 | ✅ 已实测「可以听清」 |
+| 接收连续无丢帧 | ✅ `frames` 匀速增长，`err=0 drop=0` |
+| 空闲 `largest ≥ 20 KB` | ❌ 实际 ~10 KB，见 §12 |
+| 长按 PTT 触点不误判 | ✅ `glitch=0` |
+| 连续收听 30 分钟无漂移 | ⬜ 未测 |
 
 ## 12. 风险清单
 
-| 风险 | 影响 | 缓解 |
+| 风险 | 现状 | 缓解 |
 |---|---|---|
-| heap 实测远低于估算 | V1 缩水 | **已实测：154 KB free / 112 KB largest，宽裕** |
-| 单核跑不动 48k 解码 | 音频断续 | 降 Opus complexity、跳过 CELT 音乐模式 |
-| 按键触点抖断 | PTT 中途停发 | 实测 glitch_count，必要时把 HOLD_MS 调大 |
-| 时钟 0.16% 误差累积 | 长会话缓冲耗尽 | 30 分钟验收；必要时做缓冲水位自适应 |
-| ES8311 30 dB 增益过高 | 发射削顶 | 按 §6.3 实测下调 |
-| 发射通道按需连接引入延迟 | PTT 前 200 ms 静音 | 与 xz-02 的既有行为一致，可接受 |
+| `largest` 只有 ~10 KB | **存在** | 复用 `fullState` 解析缓冲，这是根因；见 §13 |
+| PTT 期间 `largest` ~7 KB | 存在 | 已用「发射时暂停下行」腾出约 13 KB |
+| 时钟 0.16% 漂移（C3 无 APLL） | 未验证 | 需 30 分钟会话实测缓冲水位 |
+| ES8311 在 48 kHz 采集失效 | 已规避 | codec 固定 16 kHz |
+| micro-opus 不检查分配失败 | 已规避 | pseudostack 预分配 + `prewarm` 触发 |
+| 长按期间触点抖断 | 未发现 | `glitch=0`，持续观察 |
 
 ## 13. 实机性能画像（-O2 构建，静默收听 60 s 窗口）
 
