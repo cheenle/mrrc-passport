@@ -1,4 +1,5 @@
-// main/mrrc_audio.c — /WSaudioRX -> Opus decode -> I2S -> ES8311.
+// main/mrrc_audio.c — downlink audio: Opus decode -> 48k->16k -> I2S -> ES8311.
+// Frames arrive from mrrc_net on the shared /WSterminal socket.
 //
 // Wire format (same as the xz-02 firmware, verified against server.py):
 //     1 byte tag + payload,   0x00 = raw PCM, 0x01 = Opus @ 48 kHz mono
@@ -17,7 +18,6 @@
 #include "bsp_audio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_timer.h"
@@ -44,11 +44,12 @@ static const char *TAG = "audio";
 static uint8_t  s_rb[AUD_RB_BYTES];
 static size_t   s_r, s_w, s_used;
 static SemaphoreHandle_t s_rb_mtx;
-static esp_websocket_client_handle_t s_ws;
 static OpusDecoder *s_dec;
 TaskHandle_t s_audio_task_h;
 
 static uint32_t s_frames, s_errors, s_drops;
+static volatile bool s_muted;
+static int s_feed_dbg;    /* first few frames: what do the bytes look like? */   /* downlink muted while transmitting */
 static int64_t  s_dec_us;      /* accumulated opus_decode time */
 static int16_t  s_pcm48[AUD_PCM48_MAX];
 static int16_t  s_pcm16[AUD_PCM16_MAX];
@@ -93,34 +94,6 @@ static size_t rb_get(uint8_t *out, size_t max, TickType_t wait)
         }
         xSemaphoreGive(s_rb_mtx);
         return 0;
-    }
-}
-
-/* ── WebSocket ───────────────────────────────────────────────────────── */
-
-static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
-{
-    (void)arg; (void)base;
-    esp_websocket_event_data_t *ev = (esp_websocket_event_data_t *)data;
-
-    switch (id) {
-    case WEBSOCKET_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "/WSaudioRX connected");
-        break;
-    case WEBSOCKET_EVENT_DISCONNECTED:
-        ESP_LOGW(TAG, "/WSaudioRX disconnected");
-        break;
-    case WEBSOCKET_EVENT_DATA:
-        if (ev->op_code == 0x02 && ev->data_len > 1 && ev->data_ptr) {
-            const uint8_t tag = ev->data_ptr[0];
-            if (tag == 0x01) {
-                rb_put((const uint8_t *)ev->data_ptr + 1, (size_t)ev->data_len - 1);
-            }
-            /* tag 0x00 (raw PCM) is not used by this server profile. */
-        }
-        break;
-    default:
-        break;
     }
 }
 
@@ -175,7 +148,7 @@ static void audio_task(void *arg)
         s_frames++;
         /* Half duplex: drop playback while the transmitter is keyed.  Feeding
          * our own uplink back through the speaker is a howl, not audio. */
-        if (mrrc_tx_active()) continue;
+        if (s_muted || mrrc_tx_active()) continue;
         /* 48 kHz -> 16 kHz.  A 3-tap average is both the decimation filter
          * and a cheap anti-alias; the SSB passband is 3 kHz, so nothing above
          * 8 kHz matters. */
@@ -216,63 +189,38 @@ int mrrc_audio_prewarm(void)
     return 0;
 }
 
-static void audio_ws_open(void)
+void mrrc_audio_feed(const uint8_t *data, size_t len)
 {
-    if (s_ws) return;
-    char uri[320];
-    snprintf(uri, sizeof uri, "wss://%s:%d/WSaudioRX?token=%s",
-             CONFIG_MRRC_SERVER_HOST, CONFIG_MRRC_SERVER_PORT, mrrc_token());
+    if (!data || len < 3) return;
 
-    esp_websocket_client_config_t cfg = {
-        .uri = uri,
-        .headers = mrrc_auth_header(),
-        .buffer_size = 2048,
-        .task_stack = AUD_WS_STACK,
-        .reconnect_timeout_ms = 3000,
-        .network_timeout_ms = 10000,
-        .ping_interval_sec = 15,
-        .pingpong_timeout_sec = 25,
-        .skip_cert_common_name_check = true,
-    };
-    s_ws = esp_websocket_client_init(&cfg);
-    if (!s_ws) {
-        ESP_LOGE(TAG, "ws init failed");
+    /* Two framings share this function:
+     *
+     *   /WSterminal  [0x00][codec][payload]   -- codec 0x01 = Opus
+     *   /WSaudioRX   [codec][payload]
+     *
+     * Layer one is the transport marker; layer two is what the standalone
+     * audio socket used alone.  Feeding the codec byte into libopus is what
+     * produced "corrupted stream" on a third of the frames. */
+    if (data[0] == 0x00 && (data[1] == 0x00 || data[1] == 0x01)) {
+        if (data[1] == 0x01) rb_put(data + 2, len - 2);   /* Opus */
+        /* codec 0x00 would be raw PCM; this profile never sends it. */
         return;
     }
-    esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
-    esp_websocket_client_start(s_ws);
-    ESP_LOGI(TAG, "/WSaudioRX -> %s", uri);
+    if (data[0] == 0x01) rb_put(data + 1, len - 1);
 }
 
 void mrrc_audio_suspend(void)
 {
-    if (!s_ws) return;
-    /* Order matters and is easy to get wrong: stop() is what guarantees the
-     * client task has exited, unregister drops any queued event whose payload
-     * points into the client's own buffers, and only then is it safe to free.
-     * Destroying without unregistering produced a Load access fault right
-     * after the uplink socket was torn down. */
-    esp_websocket_client_stop(s_ws);
-    /* stop() joins the client task, but the event loop may still have queued
-     * callbacks whose payload points into the client's buffers.  Give them a
-     * moment to drain before freeing, otherwise destroy() produces a Load
-     * access fault. */
-    vTaskDelay(pdMS_TO_TICKS(100));
-    esp_websocket_client_destroy(s_ws);
-    s_ws = NULL;
-    if (xSemaphoreTake(s_rb_mtx, portMAX_DELAY) == pdTRUE) {
-        s_r = s_w = s_used = 0;  /* drop stale audio */
+    /* Single connection: no socket to free.  Stop playing so the uplink does
+     * not howl, and drop whatever is already queued. */
+    s_muted = true;
+    if (s_rb_mtx && xSemaphoreTake(s_rb_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_r = s_w = s_used = 0;
         xSemaphoreGive(s_rb_mtx);
     }
-    ESP_LOGI(TAG, "downlink suspended, free=%uK largest=%uK",
-             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
 }
 
-void mrrc_audio_resume(void)
-{
-    audio_ws_open();
-}
+void mrrc_audio_resume(void) { s_muted = false; }
 
 void mrrc_audio_start(void)
 {
@@ -285,7 +233,6 @@ void mrrc_audio_start(void)
         ESP_LOGE(TAG, "audio task failed");
         return;
     }
-    audio_ws_open();
 }
 
 void mrrc_audio_stats(uint32_t *frames, uint32_t *errors, uint32_t *drops)

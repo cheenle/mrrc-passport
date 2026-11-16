@@ -179,11 +179,11 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
     switch (id) {
     case WEBSOCKET_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "/WSradio connected");
+        ESP_LOGI(TAG, "/WSterminal connected");
         s_ctrl_up = true;
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
-        ESP_LOGW(TAG, "/WSradio disconnected");
+        ESP_LOGW(TAG, "/WSterminal disconnected");
         s_ctrl_up = false;
         break;
     case WEBSOCKET_EVENT_DATA: {
@@ -191,6 +191,12 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
          * buffer arrives in several events: payload_offset is the absolute
          * position inside the whole message, so reassemble first and parse
          * exactly once at the end.  Parsing a chunk yields "bad JSON (4096 B)". */
+        /* Binary frames on this socket are downlink audio. */
+        if (ev->op_code == 0x02) {
+            if (ev->data_ptr && ev->data_len > 1)
+                mrrc_audio_feed((const uint8_t *)ev->data_ptr, (size_t)ev->data_len);
+            break;
+        }
         if (ev->op_code != 0x01 || ev->payload_len <= 0 || !ev->data_ptr) break;
         if (ev->payload_len > WS_FRAME_MAX) {
             ESP_LOGW(TAG, "message too big: %d B", ev->payload_len);
@@ -204,7 +210,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         break;
     }
     case WEBSOCKET_EVENT_ERROR:
-        ESP_LOGE(TAG, "/WSradio error");
+        ESP_LOGE(TAG, "/WSterminal error");
         break;
     default:
         break;
@@ -237,6 +243,15 @@ void mrrc_net_set_ptt(bool on)
 }
 
 void mrrc_net_send_txhb(void) { ws_send_text("{\"type\":\"txhb\"}"); }
+
+void mrrc_net_send_text_stop(void) { ws_send_text("s:"); }
+
+bool mrrc_net_send_bin(const void *data, size_t len)
+{
+    if (!s_ws || !esp_websocket_client_is_connected(s_ws)) return false;
+    return esp_websocket_client_send_bin(s_ws, (const char *)data, (int)len,
+                                         pdMS_TO_TICKS(500)) >= 0;
+}
 
 void mrrc_net_set_af_gain(int gain)
 {
@@ -385,7 +400,10 @@ static void start_ws(void)
      * header: a browser WebSocket cannot set headers.  Sending both satisfies
      * either server version. */
     char uri[320];
-    snprintf(uri, sizeof uri, "wss://%s:%d/WSradio?token=%s",
+    /* One socket for control, downlink audio and uplink audio.  The three
+     * separate endpoints (/WSradio, /WSaudioRX, /WSaudioTX) each cost a TLS
+     * session; on a C3 with no PSRAM that was the binding constraint. */
+    snprintf(uri, sizeof uri, "wss://%s:%d/WSterminal?token=%s",
              CONFIG_MRRC_SERVER_HOST, CONFIG_MRRC_SERVER_PORT, s_token);
 
     esp_websocket_client_config_t cfg = {
@@ -406,7 +424,7 @@ static void start_ws(void)
     }
     esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
     esp_websocket_client_start(s_ws);
-    ESP_LOGI(TAG, "/WSradio -> %s", uri);
+    ESP_LOGI(TAG, "/WSterminal -> %s", uri);
 }
 
 static void net_task(void *arg)
@@ -421,7 +439,6 @@ static void net_task(void *arg)
      * so back off exponentially (30 s doubling to 10 min) and reset on
      * success. */
     uint32_t backoff_s = 30;
-    bool audio_started = false;
     for (;;) {
         if (!s_ws) {
             if (!s_token[0]) {
@@ -446,12 +463,6 @@ static void net_task(void *arg)
                 token_store();
                 continue;
             }
-            if (!audio_started) {
-                /* The audio socket needs the token, so it can only start once
-                 * the control link is proven. */
-                audio_started = true;
-                mrrc_audio_start();
-            }
             continue;
         } else if (!esp_websocket_client_is_connected(s_ws)) {
             /* The client reconnects on its own; only rebuild (and re-login)
@@ -460,7 +471,7 @@ static void net_task(void *arg)
             if (!esp_websocket_client_is_connected(s_ws)) {
                 esp_websocket_client_destroy(s_ws);
                 s_ws = NULL;
-                ESP_LOGW(TAG, "rebuilding /WSradio");
+                ESP_LOGW(TAG, "rebuilding /WSterminal");
                 continue;
             }
         }

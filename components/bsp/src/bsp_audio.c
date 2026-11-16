@@ -464,7 +464,9 @@ esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch) {
     // ⚠ open 之后【不要】手动覆写 ES8311 的时钟分频寄存器(REG01~06):
     //   驱动已按采样率与 MCLK 精确算好,覆写会导致 ADC/DAC 时序错乱、录音回放全是杂音。
     //   这里只设麦克风模拟 PGA 增益。
-    r = esp_codec_dev_set_in_gain(s_dev, 30.0f);
+    r = /* 30 dB clipped the ADC on this board (peak hit 32768 with normal
+     * speech at 10 cm); 18 dB leaves headroom for the MRRC uplink. */
+    esp_codec_dev_set_in_gain(s_dev, 18.0f);
     if (r == ESP_CODEC_DEV_OK) r = esp_codec_dev_set_out_vol(s_dev, s_volume);
     if (r != ESP_CODEC_DEV_OK || s_io_error != ESP_CODEC_DEV_OK) {
         e = ESP_FAIL;

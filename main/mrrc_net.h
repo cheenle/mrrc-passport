@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define MRRC_MODE_NAME_LEN 12
@@ -44,6 +45,13 @@ void mrrc_net_set_af_gain(int gain);
 /* Keying.  The server force-releases a session that stops sending {"type":
  * "txhb"} for 5 s, so the TX task must heartbeat every 1.5 s. */
 void mrrc_net_set_ptt(bool on);
+
+/* Single-connection mode: /WSterminal carries control JSON, downlink audio and
+ * uplink audio on one socket.  Binary on this socket is audio. */
+bool mrrc_net_send_bin(const void *data, size_t len);
+
+/* Tells the server that mic capture stopped ("s:"). */
+void mrrc_net_send_text_stop(void);
 void mrrc_net_send_txhb(void);
 
 /* "Authorization: Bearer ...\r\n", valid after the first successful login. */

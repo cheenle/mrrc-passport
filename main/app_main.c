@@ -155,19 +155,20 @@ static void keys_task(void *arg)
         /* ── PTT ─────────────────────────────────────────────────────── */
         if (e.ev == BSP_BTN_LONG && e.btn == BSP_BTN_OK && !ptt_on) {
             ptt_on = true;
-            /* Order matters: free the downlink (room for one TLS session), open
-             * /WSaudioTX and wait for it to be accepted, and only then send
-             * ptt:true so server.py's owner claim finds our uplink socket. */
+            /* Single /WSterminal socket: the uplink is permanently connected,
+             * so the old "open /WSaudioTX before ptt:true" ordering (needed for
+             * the server's per-socket TX-owner claim) no longer applies.  Key
+             * the radio first, give it time to open its audio path, then
+             * stream. */
             mrrc_audio_suspend();
+            mrrc_net_set_ptt(true);
+            vTaskDelay(pdMS_TO_TICKS(200));
             if (!mrrc_tx_key(true)) {
                 ESP_LOGE(TAG, "TX start failed");
                 mrrc_net_set_ptt(false);
                 mrrc_audio_resume();
                 ptt_on = false;
-                continue;
             }
-            mrrc_net_set_ptt(true);
-            vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
         if (e.ev == BSP_BTN_RELEASE && e.btn == BSP_BTN_OK && ptt_on) {
@@ -272,6 +273,10 @@ void app_main(void)
     mem_report("buttons");
 
     vol_load();
+    /* Create the audio task and its jitter-buffer mutex BEFORE the socket can
+     * deliver anything: /WSterminal starts pushing audio as soon as it
+     * connects, and feeding into an uncreated mutex asserts. */
+    mrrc_audio_start();
     mrrc_ui_start();
     mrrc_ui_set_mode(s_ui_mode, s_spk_vol);
     bsp_audio_set_volume((uint8_t)s_spk_vol);

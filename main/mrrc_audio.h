@@ -1,6 +1,7 @@
 // main/mrrc_audio.h — downlink audio (S2).
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Connects /WSaudioRX and starts the decode+playback task.  Call after
@@ -11,6 +12,11 @@
 int mrrc_audio_prewarm(void);
 
 void mrrc_audio_start(void);
+
+/* Downlink audio arrives on the shared /WSterminal socket.  The tag byte
+ * differs between transports (0x01 on /WSaudioRX, 0x00 on /WSterminal), so both
+ * are accepted. */
+void mrrc_audio_feed(const uint8_t *data, size_t len);
 
 /* Half duplex: the terminal only has room for one extra TLS session, so the
  * downlink socket is torn down while the transmitter is keyed and rebuilt on
