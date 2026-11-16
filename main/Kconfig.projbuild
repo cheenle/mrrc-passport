@@ -1,0 +1,32 @@
+menu "MRRC Terminal"
+
+    config MRRC_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+
+    config MRRC_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+
+    config MRRC_SERVER_HOST
+        string "MRRC server host"
+        default ""
+
+    config MRRC_SERVER_PORT
+        int "MRRC server port"
+        default 443
+
+    config MRRC_SERVER_PASSWORD
+        string "MRRC web password"
+        default ""
+
+    config MRRC_PROBE_AUDIO_HZ
+        int "Probe codec sample rate"
+        default 48000
+        help
+            The ES8311 shares MCLK/BCLK/WS between capture and playback, so both
+            directions must run at one rate.  48 kHz keeps the server's Opus
+            downlink untouched and lets the microphone be decimated to 16 kHz
+            in software before encoding.
+
+endmenu
