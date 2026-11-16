@@ -20,6 +20,7 @@
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "esp_timer.h"
 #include "freertos/task.h"
 #include "mrrc_audio.h"
 #include "mrrc_net.h"
@@ -48,6 +49,7 @@ static OpusDecoder *s_dec;
 TaskHandle_t s_audio_task_h;
 
 static uint32_t s_frames, s_errors, s_drops;
+static int64_t  s_dec_us;      /* accumulated opus_decode time */
 static int16_t  s_pcm48[AUD_PCM48_MAX];
 static int16_t  s_pcm16[AUD_PCM16_MAX];
 
@@ -158,7 +160,13 @@ static void audio_task(void *arg)
             ESP_LOGI(TAG, "opus decoder ready (48 kHz mono)");
         }
 
+#if CONFIG_MRRC_PROFILE
+        const int64_t t0 = esp_timer_get_time();
+#endif
         const int got = opus_decode(s_dec, frame, (opus_int32)n, s_pcm48, AUD_PCM48_MAX, 0);
+#if CONFIG_MRRC_PROFILE
+        s_dec_us += esp_timer_get_time() - t0;
+#endif
         if (got <= 0) {
             s_errors++;
             if ((s_errors & 0x7F) == 1) ESP_LOGW(TAG, "decode error %s", opus_strerror(got));
@@ -277,4 +285,10 @@ void mrrc_audio_stats(uint32_t *frames, uint32_t *errors, uint32_t *drops)
     if (frames) *frames = s_frames;
     if (errors) *errors = s_errors;
     if (drops)  *drops  = s_drops;
+}
+
+void mrrc_audio_profile(uint32_t *frames, int64_t *dec_us)
+{
+    if (frames) *frames = s_frames;
+    if (dec_us) *dec_us = s_dec_us;
 }

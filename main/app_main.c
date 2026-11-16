@@ -179,6 +179,27 @@ void app_main(void)
                  (long)g_radio.freq_hz, g_radio.s_meter,
                  (unsigned)bsp_button_glitch_count(),
                  (unsigned)af, (unsigned)ae, (unsigned)ad);
+#if CONFIG_MRRC_PROFILE
+        /* ── profile dump ─────────────────────────────────────────────── */
+        {
+            static char buf[1024];
+            uint32_t afr = 0;
+            int64_t dus = 0;
+            mrrc_audio_profile(&afr, &dus);
+            ESP_LOGI(TAG, "mem: free=%uK largest=%uK min=%uK dma_free=%uK",
+                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                     (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
+                     (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_DMA) / 1024));
+            if (afr)
+                ESP_LOGI(TAG, "decode: %lld us/frame avg over %u frames "
+                              "(%.1f%% of a 20 ms frame)",
+                         (long long)(dus / afr), (unsigned)afr,
+                         100.0 * (double)dus / (double)afr / 20000.0);
+            vTaskGetRunTimeStats(buf);
+            ESP_LOGI(TAG, "cpu:\n%s", buf);
+        }
+#endif
         unsigned k = 0, kf = 0, kfr = 0, ksf = 0, krf = 0, kld = 0;
         mrrc_tx_stats(&k, &kf, &kfr, &ksf, &krf, &kld);
         if (s_audio_task_h)

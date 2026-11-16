@@ -20,3 +20,7 @@ void mrrc_audio_suspend(void);
 void mrrc_audio_resume(void);
 
 void mrrc_audio_stats(uint32_t *frames, uint32_t *errors, uint32_t *drops);
+
+/* Profiling: total frames decoded and the accumulated time spent inside
+ * opus_decode(), for computing real-time load on this core. */
+void mrrc_audio_profile(uint32_t *frames, int64_t *dec_us);

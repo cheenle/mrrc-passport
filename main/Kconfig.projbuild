@@ -39,4 +39,14 @@ menu "MRRC Terminal"
             5 s -> unkey -> resume).  Saves asking a human to hold a button
             while reading a serial log.
 
+    config MRRC_PROFILE
+        bool "Runtime profiling (per-task CPU, decode cost, heap high-water)"
+        default n
+        help
+            Prints a per-task CPU breakdown (FreeRTOS run-time stats), the
+            average opus_decode() cost per frame, and heap high-water marks once
+            a minute.  Run-time stats charge every tick, so this is off in
+            shipping builds; turn it on when you need numbers instead of
+            intuition.
+
 endmenu
