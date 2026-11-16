@@ -32,7 +32,13 @@ static const char *TAG = "audio";
 #define AUD_TASK_STACK 8192
 #define AUD_RB_BYTES   6144         /* ~0.8 s of 64 kbps Opus */
 #define AUD_FRAME_MAX  576          /* 60 ms @ 48 kHz mono Opus is < 200 B */
-#define AUD_PCM_MAX    2880         /* 60 ms @ 48 kHz — the server sends 60 ms frames */
+#define AUD_PCM48_MAX  2880         /* 60 ms @ 48 kHz: what Opus decodes to */
+#define AUD_PCM16_MAX   960         /* 60 ms @ 16 kHz: what the codec plays */
+
+/* The codec runs at 16 kHz, not 48 kHz.  Measured on this board: the ES8311
+ * ADC delivers ~468 peak at 48 kHz and ~12708 at 16 kHz for the same speech —
+ * the microphone path is effectively dead at 48 kHz (ai-passport's own demo
+ * only ever uses 16 kHz).  The downlink therefore decimates 3:1 after decode. */
 
 static uint8_t  s_rb[AUD_RB_BYTES];
 static size_t   s_r, s_w, s_used;
@@ -44,7 +50,8 @@ static OpusEncoder *s_enc;
 #define TX_FRAME 960        /* 60 ms at 16 kHz, the rate the server expects */
 
 static uint32_t s_frames, s_errors, s_drops;
-static int16_t  s_pcm[AUD_PCM_MAX];
+static int16_t  s_pcm48[AUD_PCM48_MAX];
+static int16_t  s_pcm16[AUD_PCM16_MAX];
 
 /* ── jitter buffer ───────────────────────────────────────────────────── */
 
@@ -158,7 +165,7 @@ static void audio_task(void *arg)
             ESP_LOGI(TAG, "opus decoder ready (48 kHz mono)");
         }
 
-        const int got = opus_decode(s_dec, frame, (opus_int32)n, s_pcm, AUD_PCM_MAX, 0);
+        const int got = opus_decode(s_dec, frame, (opus_int32)n, s_pcm48, AUD_PCM48_MAX, 0);
         if (got <= 0) {
             s_errors++;
             if ((s_errors & 0x1F) == 1) ESP_LOGW(TAG, "decode error %s", opus_strerror(got));
@@ -168,9 +175,18 @@ static void audio_task(void *arg)
         /* Half duplex: drop playback while the transmitter is keyed.  Feeding
          * our own uplink back through the speaker is a howl, not audio. */
         if (mrrc_tx_active()) continue;
+        /* 48 kHz -> 16 kHz.  A 3-tap average is both the decimation filter
+         * and a cheap anti-alias; the SSB passband is 3 kHz, so nothing above
+         * 8 kHz matters. */
+        int out = 0;
+        for (int i = 0; i + 2 < got; i += 3) {
+            const int32_t v = (s_pcm48[i] + s_pcm48[i + 1] + s_pcm48[i + 2]) / 3;
+            s_pcm16[out++] = (int16_t)v;
+        }
+        if (out <= 0) continue;
         /* Blocking on the I2S DMA is what paces this loop; the codec's
          * auto_clear_after_cb fills silence when we are late. */
-        if (bsp_audio_write(s_pcm, (size_t)got * sizeof(int16_t)) != ESP_OK)
+        if (bsp_audio_write(s_pcm16, (size_t)out * sizeof(int16_t)) != ESP_OK)
             s_errors++;
     }
 }
@@ -188,8 +204,8 @@ int mrrc_audio_prewarm(void)
         }
         /* PLC path runs the full decode prologue, which is what actually
          * reserves the pseudostack. */
-        static int16_t pcm[AUD_PCM_MAX];
-        (void)opus_decode(s_dec, NULL, 0, pcm, AUD_PCM_MAX, 0);
+        static int16_t pcm[AUD_PCM48_MAX];
+        (void)opus_decode(s_dec, NULL, 0, pcm, AUD_PCM48_MAX, 0);
     }
 
     /* No encoder: the uplink is raw 48 kHz PCM (server resamples), so the
@@ -224,14 +240,9 @@ int mrrc_audio_prewarm(void)
     return 0;
 }
 
-void mrrc_audio_start(void)
+static void audio_ws_open(void)
 {
-    s_rb_mtx = xSemaphoreCreateMutex();
-    if (!s_rb_mtx) {
-        ESP_LOGE(TAG, "no mutex");
-        return;
-    }
-
+    if (s_ws) return;
     char uri[320];
     snprintf(uri, sizeof uri, "wss://%s:%d/WSaudioRX?token=%s",
              CONFIG_MRRC_SERVER_HOST, CONFIG_MRRC_SERVER_PORT, mrrc_token());
@@ -253,12 +264,42 @@ void mrrc_audio_start(void)
         return;
     }
     esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
+    esp_websocket_client_start(s_ws);
+    ESP_LOGI(TAG, "/WSaudioRX -> %s", uri);
+}
+
+void mrrc_audio_suspend(void)
+{
+    if (!s_ws) return;
+    esp_websocket_client_stop(s_ws);
+    esp_websocket_client_destroy(s_ws);
+    s_ws = NULL;
+    if (xSemaphoreTake(s_rb_mtx, portMAX_DELAY) == pdTRUE) {
+        s_r = s_w = s_used = 0;  /* drop stale audio */
+        xSemaphoreGive(s_rb_mtx);
+    }
+    ESP_LOGI(TAG, "downlink suspended, free=%uK largest=%uK",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
+}
+
+void mrrc_audio_resume(void)
+{
+    audio_ws_open();
+}
+
+void mrrc_audio_start(void)
+{
+    s_rb_mtx = xSemaphoreCreateMutex();
+    if (!s_rb_mtx) {
+        ESP_LOGE(TAG, "no mutex");
+        return;
+    }
     if (xTaskCreate(audio_task, "audio", AUD_TASK_STACK, NULL, 8, NULL) != pdPASS) {
         ESP_LOGE(TAG, "audio task failed");
         return;
     }
-    esp_websocket_client_start(s_ws);
-    ESP_LOGI(TAG, "/WSaudioRX -> %s", uri);
+    audio_ws_open();
 }
 
 void mrrc_audio_stats(uint32_t *frames, uint32_t *errors, uint32_t *drops)

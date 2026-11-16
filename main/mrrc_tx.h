@@ -16,3 +16,9 @@
  * Requires the codec to be open (S2 does that at boot). */
 bool mrrc_tx_key(bool on);
 bool mrrc_tx_active(void);
+
+/* Last keying event and cumulative counters, replayed in the idle log so a
+ * reboot does not destroy the evidence. */
+const char *mrrc_tx_last_event(void);
+void mrrc_tx_stats(unsigned *keys, unsigned *fails, unsigned *frames,
+                   unsigned *send_fail, unsigned *read_fail, unsigned *link_downs);

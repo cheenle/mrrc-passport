@@ -12,4 +12,11 @@ int mrrc_audio_prewarm(void);
 
 void mrrc_audio_start(void);
 
+/* Half duplex: the terminal only has room for one extra TLS session, so the
+ * downlink socket is torn down while the transmitter is keyed and rebuilt on
+ * release.  Suspend frees ~16 KB (socket + TLS context), which is exactly what
+ * /WSaudioTX needs. */
+void mrrc_audio_suspend(void);
+void mrrc_audio_resume(void);
+
 void mrrc_audio_stats(uint32_t *frames, uint32_t *errors, uint32_t *drops);

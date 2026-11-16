@@ -277,6 +277,44 @@ E websocket_client: esp_transport_read() failed with -28928
 
 开发建议：调试期间把服务端限流放宽（如 20 次/5 分钟），或把 token 存 NVS 复用。两条都不做的话，每次改固件验证要等 5 分钟。
 
+**③ ES8311 在 48 kHz 下麦克风近乎失聪（真 bug）**
+
+同一段采集代码、同一颗麦克风，只改 codec 采样率：
+
+| codec 采样率 | PCM 峰值（满量程 32767） |
+|---|---|
+| 48 000 Hz | **468** |
+| 16 000 Hz | **12 708** |
+
+差 27 倍。`ref/ai-passport` 的音频 demo 全程只用 16 kHz，48 kHz 采集从未被验证过。
+最终方案：codec 固定 **16 kHz**，接收解码 48 kHz 后 3:1 抽取（三点平均兼作抗混叠），
+发送前 3:1 零阶保持升采样到 48 kHz 交给服务端（服务端自己再重采样到 44.1 kHz）。
+
+**④ 一条被推翻的结论（记录以免重犯）**
+
+S3 期间我曾从 `frames=34 / 5 s` 推出「TLS 上行只有 ~104 kbit/s，48 kHz PCM 发不出去，
+必须改 Opus 编码」。**这个推论是错的**：同一份日志里 `linkdowns=2`，连接断开期间
+`tx_task` 根本不发帧，因此不能用它计算稳定吞吐。实测（用户听感）48 kHz 裸 PCM 正常，
+带宽够用，Opus 上行方案作废。
+
+教训：用计数器估算吞吐之前，先确认计数器只覆盖了"链路正常"的时段。
+
+**⑤ PTT 与 /WSaudioTX 的先后顺序（否则电台 key 了但没调制）**
+
+`server.py` 在收到 `ptt:true` 时才认领 TX 上行所有权：
+
+```python
+for tx_ws in list(audio_tx_clients):
+    if _ws_tokens.get(tx_ws) == token:
+        _tx_owner_ws = tx_ws
+```
+
+它扫描的是**已经连上的** `audio_tx_clients`。如果先发 `ptt:true` 再连 `/WSaudioTX`，
+扫描时我们的 socket 还不存在，owner 落在别人（网页端）手里，此后我们发的每一帧都被
+当 non-owner 丢弃 —— 表现正是「FT-710 有 TX、完全没有声音」。
+
+正确顺序：**先连 `/WSaudioTX` 并等它 accepted，再发 `ptt:true`**。
+
 ## 9.4 通道与延迟
 
 | 用途 | 通道 | 连接策略 |

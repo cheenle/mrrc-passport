@@ -71,21 +71,29 @@ static void keys_task(void *arg)
          * press, so a double-tap can never leak carrier. */
         if (e.ev == BSP_BTN_LONG && e.btn == BSP_BTN_OK && !ptt_on) {
             ptt_on = true;
-            mrrc_net_set_ptt(true);
-            /* The server has to key the radio and reopen its TX stream; racing
-             * that with audio is what produces the first-frame click. */
-            vTaskDelay(pdMS_TO_TICKS(200));
+            /* Order matters:
+             *   1. free the downlink socket (room for one extra TLS session)
+             *   2. open /WSaudioTX and wait until it is accepted
+             *   3. only then send ptt:true, so server.py's owner claim finds
+             *      our uplink socket in audio_tx_clients
+             * Sending ptt first makes the radio key with no modulation. */
+            mrrc_audio_suspend();
             if (!mrrc_tx_key(true)) {
                 ESP_LOGE(TAG, "TX start failed");
                 mrrc_net_set_ptt(false);
+                mrrc_audio_resume();
                 ptt_on = false;
+                continue;
             }
+            mrrc_net_set_ptt(true);
+            vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
         if (e.ev == BSP_BTN_RELEASE && e.btn == BSP_BTN_OK && ptt_on) {
             ptt_on = false;
             mrrc_tx_key(false);
             mrrc_net_set_ptt(false);
+            mrrc_audio_resume();
             continue;
         }
 
@@ -153,6 +161,30 @@ void app_main(void)
     mrrc_net_start();
     mem_report("net started");
 
+#if CONFIG_MRRC_PTT_SELFTEST
+    /* Same path as the OK long-press, driven from here so a hang can be
+     * diagnosed from a log instead of a finger. */
+    for (int i = 0; i < 45 && !mrrc_net_up(); i++) vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(8000));          /* let the downlink settle */
+    ESP_LOGW(TAG, "SELFTEST: suspend -> key");
+    mrrc_audio_suspend();
+    mrrc_net_set_ptt(true);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    ESP_LOGW(TAG, "SELFTEST: tx_key(true)");
+    const bool keyed = mrrc_tx_key(true);
+    ESP_LOGW(TAG, "SELFTEST: keyed=%d, holding 5 s", (int)keyed);
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    ESP_LOGW(TAG, "SELFTEST: unkey");
+    mrrc_tx_key(false);
+    mrrc_net_set_ptt(false);
+    mrrc_audio_resume();
+    unsigned sk = 0, sf = 0, sfr = 0, ssf = 0, srf = 0, sld = 0;
+    mrrc_tx_stats(&sk, &sf, &sfr, &ssf, &srf, &sld);
+    ESP_LOGW(TAG, "SELFTEST DONE keys=%u fails=%u frames=%u sendfail=%u "
+                  "readfail=%u linkdowns=%u last=%s",
+             sk, sf, sfr, ssf, srf, sld, mrrc_tx_last_event());
+#endif
+
     /* Battery is polled slowly; the CW2017 sits on the shared I2C bus with the
      * codec, so there is no reason to hammer it. */
     for (;;) {
@@ -168,5 +200,10 @@ void app_main(void)
                  (long)g_radio.freq_hz, g_radio.s_meter,
                  (unsigned)bsp_button_glitch_count(),
                  (unsigned)af, (unsigned)ae, (unsigned)ad);
+        unsigned k = 0, kf = 0, kfr = 0, ksf = 0, krf = 0, kld = 0;
+        mrrc_tx_stats(&k, &kf, &kfr, &ksf, &krf, &kld);
+        ESP_LOGI(TAG, "tx: keys=%u fails=%u frames=%u sendfail=%u readfail=%u "
+                      "linkdowns=%u last=%s",
+                 k, kf, kfr, ksf, krf, kld, mrrc_tx_last_event());
     }
 }
