@@ -64,3 +64,10 @@ CONFIG_BT_ENABLED=n
 CONFIG_OPUS_PSEUDOSTACK_SIZE=60000
 # Fixed point: ESP32-C3 has no FPU at all (SOC_CPU_HAS_FPU is not defined).
 # CONFIG_OPUS_FLOATING_POINT is not set
+
+# --- 性能 ---
+# 默认是 -Og。这颗 C3 没 FPU，Opus 解码与音频重采样全靠整数运算；
+# -O2 在这里不是"锦上添花"，是能不能实时解码的前提。
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+# 日志：保留 INFO（运行期诊断仍需要），但热路径里的逐帧日志已在代码层删除。
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

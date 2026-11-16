@@ -370,6 +370,9 @@ static bool wifi_up(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
+    /* A talk terminal cannot tolerate modem sleep: it delays inbound audio by
+     * 100 ms+ and bursts the downlink.  Cost is idle current. */
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
     return (xEventGroupWaitBits(s_net_ev, NET_UP, pdFALSE, pdFALSE,
                                 pdMS_TO_TICKS(25000)) & NET_UP) != 0;

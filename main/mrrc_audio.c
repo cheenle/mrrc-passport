@@ -45,9 +45,6 @@ static size_t   s_r, s_w, s_used;
 static SemaphoreHandle_t s_rb_mtx;
 static esp_websocket_client_handle_t s_ws;
 static OpusDecoder *s_dec;
-static OpusEncoder *s_enc;
-#define TX_RATE 16000
-#define TX_FRAME 960        /* 60 ms at 16 kHz, the rate the server expects */
 
 static uint32_t s_frames, s_errors, s_drops;
 static int16_t  s_pcm48[AUD_PCM48_MAX];
@@ -131,7 +128,6 @@ static void audio_task(void *arg)
     (void)arg;
     static uint8_t frame[AUD_FRAME_MAX];
 
-    uint32_t idle_rounds = 0;
     for (;;) {
         const size_t n = rb_get(frame, sizeof frame, pdMS_TO_TICKS(100));
         if (n == 0) {
@@ -139,12 +135,8 @@ static void audio_task(void *arg)
              * this delay the loop spins at full speed and starves IDLE, which
              * trips the task watchdog (5 s) on a single-core C3. */
             vTaskDelay(pdMS_TO_TICKS(2));
-            if ((++idle_rounds % 500) == 0)
-                ESP_LOGI(TAG, "waiting for audio (frames=%u err=%u drop=%u)",
-                         (unsigned)s_frames, (unsigned)s_errors, (unsigned)s_drops);
             continue;
         }
-        idle_rounds = 0;
 
         if (!s_dec) {
             /* micro-opus allocates its pseudostack lazily on the first decode
@@ -168,7 +160,7 @@ static void audio_task(void *arg)
         const int got = opus_decode(s_dec, frame, (opus_int32)n, s_pcm48, AUD_PCM48_MAX, 0);
         if (got <= 0) {
             s_errors++;
-            if ((s_errors & 0x1F) == 1) ESP_LOGW(TAG, "decode error %s", opus_strerror(got));
+            if ((s_errors & 0x7F) == 1) ESP_LOGW(TAG, "decode error %s", opus_strerror(got));
             continue;
         }
         s_frames++;
@@ -205,33 +197,10 @@ int mrrc_audio_prewarm(void)
         /* PLC path runs the full decode prologue, which is what actually
          * reserves the pseudostack. */
         static int16_t pcm[AUD_PCM48_MAX];
-        (void)opus_decode(s_dec, NULL, 0, pcm, AUD_PCM48_MAX, 0);
-    }
-
-    /* No encoder: the uplink is raw 48 kHz PCM (server resamples), so the
-     * 15 KB instance and the 24 KB encode pseudostack are not needed. */
-    if (0 && !s_enc) {
-        s_enc = opus_encoder_create(TX_RATE, 1, OPUS_APPLICATION_AUDIO, &err);
-        if (err != OPUS_OK || !s_enc) {
-            ESP_LOGE(TAG, "encoder create failed: %d", err);
-            s_enc = NULL;
-            return -1;
-        }
-        opus_encoder_ctl(s_enc, OPUS_SET_BITRATE(16000));
-        opus_encoder_ctl(s_enc, OPUS_SET_COMPLEXITY(0));
-        opus_encoder_ctl(s_enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
-        opus_encoder_ctl(s_enc, OPUS_SET_INBAND_FEC(1));
-        opus_encoder_ctl(s_enc, OPUS_SET_PACKET_LOSS_PERC(10));
-
-        static int16_t silence[TX_FRAME];
-        static uint8_t probe[512];
-        const int n = opus_encode(s_enc, silence, TX_FRAME, probe, sizeof probe);
-        if (n < 0) {
-            ESP_LOGE(TAG, "encoder warmup failed: %s", opus_strerror(n));
-            opus_encoder_destroy(s_enc);
-            s_enc = NULL;
-            return -1;
-        }
+        /* Result intentionally ignored: this only forces the pseudostack to be
+         * reserved while the heap is still unfragmented. */
+        const int warm = opus_decode(s_dec, NULL, 0, pcm, AUD_PCM48_MAX, 0);
+        (void)warm;
     }
 
     ESP_LOGI(TAG, "opus prewarm ok: free=%uK largest=%uK",

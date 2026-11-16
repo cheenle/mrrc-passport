@@ -20,14 +20,15 @@ menu "MRRC Terminal"
         string "MRRC web password"
         default ""
 
-    config MRRC_PROBE_AUDIO_HZ
-        int "Probe codec sample rate"
+    config MRRC_AUDIO_HZ
+        int "Codec sample rate"
         default 16000
         help
-            The ES8311 shares MCLK/BCLK/WS between capture and playback, so both
-            directions must run at one rate.  48 kHz keeps the server's Opus
-            downlink untouched and lets the microphone be decimated to 16 kHz
-            in software before encoding.
+            The ES8311 shares MCLK/BCLK/WS, so both directions run at one rate.
+            16 kHz is required, not a preference: measured on this board the
+            ADC delivers peak 468 at 48 kHz vs 12708 at 16 kHz for the same
+            speech.  The downlink decimates 3:1 after Opus decode and the
+            uplink upsamples 3:1 back to 48 kHz for the server.
 
     config MRRC_PTT_SELFTEST
         bool "Key the transmitter once, automatically, after boot"

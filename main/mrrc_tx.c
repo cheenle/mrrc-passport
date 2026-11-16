@@ -124,8 +124,7 @@ static void tx_task(void *arg)
             if (pk > s_peak_max) s_peak_max = pk;
             s_peak_avg_sum += (int)(sum / TX_MIC_FRAME);
             s_peak_avg_n++;
-            if ((s_tx_frames % 40) == 0)
-                ESP_LOGI(TAG, "mic peak=%d avg=%ld", pk, sum / TX_FRAME);
+
         }
         /* 16 kHz -> 48 kHz by zero-order hold.  The server resamples 48->44.1
          * anyway and the passband is 3 kHz, so the images this leaves far
@@ -189,9 +188,6 @@ bool mrrc_tx_key(bool on)
             .skip_cert_common_name_check = true,
         };
         s_ws = esp_websocket_client_init(&cfg);
-        note("step:init %s free=%uK largest=%uK", s_ws ? "ok" : "FAIL",
-             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
         if (!s_ws) return false;
         esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
         esp_websocket_client_start(s_ws);

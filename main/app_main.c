@@ -134,8 +134,8 @@ void app_main(void)
 
     if (bsp_audio_init() == ESP_OK) {
         /* One rate for both directions, forever.  See docs/design-v1.md 3.1. */
-        if (bsp_audio_set_format(CONFIG_MRRC_PROBE_AUDIO_HZ, 16, 1) != ESP_OK)
-            ESP_LOGE(TAG, "codec open failed at %d Hz", CONFIG_MRRC_PROBE_AUDIO_HZ);
+        if (bsp_audio_set_format(CONFIG_MRRC_AUDIO_HZ, 16, 1) != ESP_OK)
+            ESP_LOGE(TAG, "codec open failed at %d Hz", CONFIG_MRRC_AUDIO_HZ);
         bsp_audio_set_volume(60);
     } else {
         ESP_LOGE(TAG, "audio init failed");
@@ -161,34 +161,11 @@ void app_main(void)
     mrrc_net_start();
     mem_report("net started");
 
-#if CONFIG_MRRC_PTT_SELFTEST
-    /* Same path as the OK long-press, driven from here so a hang can be
-     * diagnosed from a log instead of a finger. */
-    for (int i = 0; i < 45 && !mrrc_net_up(); i++) vTaskDelay(pdMS_TO_TICKS(1000));
-    vTaskDelay(pdMS_TO_TICKS(8000));          /* let the downlink settle */
-    ESP_LOGW(TAG, "SELFTEST: suspend -> key");
-    mrrc_audio_suspend();
-    mrrc_net_set_ptt(true);
-    vTaskDelay(pdMS_TO_TICKS(200));
-    ESP_LOGW(TAG, "SELFTEST: tx_key(true)");
-    const bool keyed = mrrc_tx_key(true);
-    ESP_LOGW(TAG, "SELFTEST: keyed=%d, holding 5 s", (int)keyed);
-    vTaskDelay(pdMS_TO_TICKS(5000));
-    ESP_LOGW(TAG, "SELFTEST: unkey");
-    mrrc_tx_key(false);
-    mrrc_net_set_ptt(false);
-    mrrc_audio_resume();
-    unsigned sk = 0, sf = 0, sfr = 0, ssf = 0, srf = 0, sld = 0;
-    mrrc_tx_stats(&sk, &sf, &sfr, &ssf, &srf, &sld);
-    ESP_LOGW(TAG, "SELFTEST DONE keys=%u fails=%u frames=%u sendfail=%u "
-                  "readfail=%u linkdowns=%u last=%s",
-             sk, sf, sfr, ssf, srf, sld, mrrc_tx_last_event());
-#endif
 
     /* Battery is polled slowly; the CW2017 sits on the shared I2C bus with the
      * codec, so there is no reason to hammer it. */
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(30000));
+        vTaskDelay(pdMS_TO_TICKS(60000));
         const int soc = bsp_battery_soc();
         if (soc >= 0) mrrc_ui_set_battery(soc, false);
         uint32_t af = 0, ae = 0, ad = 0;
