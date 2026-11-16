@@ -248,16 +248,22 @@ y 260..300   状态片：[FREQ] [RX/TX] [LINK]
 
 ## 9. 网络设计
 
-### 9.1 通道（最终形态）
+### 9.1 通道（最终形态：一条连接）
 
-| 通道 | 用途 | 连接策略 |
+| 通道 | 承载 | 备注 |
 |---|---|---|
-| `/WSradio` | `fullState` / `stateUpdate` / `s_meter` / `set` / `ptt` / `txhb` | 常驻 |
-| `/WSaudioRX` | 下行音频 | 常驻，PTT 期间暂停（腾出一条 TLS 的空间） |
-| `/WSaudioTX` | 上行音频 | **仅 PTT 期间按需连接**，松手即断 |
+| `/WSterminal` | 控制 JSON + 下行 Opus + 上行 PCM + 频谱 | **唯一一条 TLS** |
 
-鉴权一律走 `?token=`：`server.py` 用 `ws.query_params` 校验，**不认 Authorization header**
-（浏览器 WebSocket 无法设置 header）。两条都带可以同时兼容新旧服务端。
+帧格式（三者不同，别照抄）：
+
+| 类型 | WebSocket opcode | 帧结构 |
+|---|---|---|
+| 控制 | `0x01` text | JSON，超过 4 KB 会被分片，需按 `payload_offset` 累积 |
+| 下行音频 | `0x02` binary | `[0x00][codec][payload]`，codec `0x01` = Opus |
+| 上行音频 | `0x02` binary | `[0x01][PCM]`（单层！） |
+| 频谱 | `0x02` binary | `[0x02][0x01] + 850 bins`，852 B，约 5.3 Hz |
+
+鉴权一律走 `?token=`：`server.py` 用 `ws.query_params` 校验，**不认 Authorization header**。
 
 ### 9.2 V2：单连接多路复用（需改服务端）
 
@@ -330,22 +336,27 @@ for tx_ws in list(audio_tx_clients):
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| **S0** | 探针固件：Wi-Fi / TLS / codec / Opus 分阶段打点 | ✅ 实测 154 KB free / 112 KB largest |
+| **S0** | 探针固件：Wi-Fi / TLS / codec / Opus 分阶段打点 | ✅ 154 KB free / 112 KB largest |
 | **S1** | `/WSradio` 控制通道 + LVGL 界面 + 调频键 | ✅ |
 | **S2** | 下行音频（Opus 48k → 3:1 抽取 → 16k → 喇叭） | ✅ `err=0 drop=0` |
-| **S3** | PTT 上行（16k 麦克风 → 3:1 升采样 → 48k PCM） | ✅ 已实测通话清晰 |
-| **S4** | 长时间稳定性、`largest` 优化、VOL 档与连发 | ⬜ |
+| **S3** | PTT 上行（16k 麦克风 → 48k PCM） | ✅ 已实测通话清晰 |
+| **V2-1** | 单连接 `/WSterminal`（控制+下行+上行） | ✅ largest 18 → 26 KB |
+| **V2-1b** | 三档旋钮 + 频道表 + 三击切模式 | ✅ |
+| **V2-1c** | IPv6 + 公网域名 `w103d.vlsc.net` | ✅ |
+| **V2-2** | 频谱 + 瀑布（`lv_line` / `lv_canvas`） | ✅ |
+| **V2-3** | 省电与休眠 | ⬜ |
 
 ## 11. 验收标准与实测结果
 
 | 标准 | 结果 |
 |---|---|
 | PTT 松手后服务端收到 `ptt:false` | ✅ |
-| 连续发射不掉线、不触发活性闸门 | ✅ 多次键控 `downs=0` |
+| 连续发射不掉线 | ✅ `frames=212 sendfail=0` |
 | 通话可懂 | ✅ 已实测「可以听清」 |
-| 接收连续无丢帧 | ✅ `frames` 匀速增长，`err=0 drop=0` |
-| 空闲 `largest ≥ 20 KB` | ❌ 实际 ~10 KB，见 §12 |
+| 接收连续无丢帧 | ✅ `err=0 drop=0` |
+| 空闲 `largest ≥ 20 KB` | ✅ 26 KB |
 | 长按 PTT 触点不误判 | ✅ `glitch=0` |
+| 三档 / 三击 / 频道 | ✅ 日志验证 `mode -> VOL`、`chan 5 -> 7210000 LSB` |
 | 连续收听 30 分钟无漂移 | ⬜ 未测 |
 
 ## 12. 风险清单
@@ -391,3 +402,28 @@ for tx_ws in list(audio_tx_clients):
 
 **下一步的内存工作应该针对 `largest` 而不是 `free`**：要么把 fullState 解析改成复用缓冲，
 要么给 TLS 预留一段连续堆。
+
+### 9.3.6 IPv6：三个开关缺一不可
+
+换公网域名时接口一直报 `0 IPv6 address(es)`，逐层排查才定位：
+
+```c
+CONFIG_LWIP_IPV6=y                    // 只是把 IPv6 编进 lwIP
+CONFIG_LWIP_IPV6_AUTOCONFIG=y         // 只是允许接受 RA（SLAAC）
+esp_netif_create_ip6_linklocal(netif) // 必须显式调用，且在 GOT_IP 之后
+```
+
+`esp_netif_create_default_wifi_sta()` **不会**自动给接口挂 link-local，所以在补上第三个
+之前，前两个开了也没用。补上后：`fe80::` 立即出现，约 6 秒后（第一个 RA）拿到全局
+`2409:...` 地址，`/WSterminal` 随即通过 IPv6 连上 `w103d.vlsc.net`。
+注意打印时 `esp_ip6_addr_t.addr` 是小端字序，直接格式化会是反的。
+
+### 9.3.7 按键：双击与三击共用一个键的取舍
+
+OK 键同时承担 PTT（长按）、三档循环（双击）、模式切换（三击）。双击和三击在同一个
+键上天然冲突：若双击立即执行，检测到第三下时动作已经发生。因此双击动作要等
+**600 ms** 窗口过去（期间键任务以 50 ms 轮询），代价是双击有 0.6 秒延迟感。
+
+另外 `iot_button` 的 `BUTTON_DOUBLE_CLICK` 在这块板上**永远不会触发**：它的判定依赖
+`repeat == 2`，而 BSP 按键锁让抬起事件晚 120 ms，第二次按下落进第一次的按住窗口。
+所以轻点计数是应用层自己做的（见 §9.3.5）。

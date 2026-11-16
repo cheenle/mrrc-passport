@@ -50,7 +50,6 @@ static lv_obj_t *s_toast;
  * turn ports the web client's WF_PALETTES.jet.  The spectrum trace is that
  * firmware's C_BLUE (0x3C1E); the waterfall uses the 64-step Jet scale. */
 #define C_SCOPE_BLUE  0x3C1E
-#define C_SCOPE_BG    0x0000
 
 static uint16_t s_heat[64];
 
@@ -106,7 +105,6 @@ static uint8_t s_prev_cols[SCOPE_W];
 static uint8_t s_cur_cols[SCOPE_W];
 static uint32_t s_wf_t;        /* 0..1000 progress from prev to cur */
 static bool s_wf_started;
-static uint8_t s_wf_div;      /* waterfall advances every other tick */
 
 static uint32_t s_last_seq = 0xFFFFFFFF;
 static uint32_t s_last_meter = 0xFFFFFFFF;
@@ -283,11 +281,6 @@ static void refresh(void)
         s_wf_t = 0;
 
         /* waterfall: shift up one row, push the newest through the Jet scale */
-        /* The waterfall is a 25.9 KB RGB565 image; redrawing it every tick
-         * starves taskLVGL.  Every other tick keeps the motion smooth and
-         * halves the SPI + render load. */
-        if (++s_wf_div < 2) { if (s_spec_img) lv_obj_invalidate(s_spec_img); return; }
-        s_wf_div = 0;
         memmove(s_wf_buf, s_wf_buf + SCOPE_W,
                 sizeof(s_wf_buf) - SCOPE_W * sizeof(uint16_t));
         if (s_spec_img) lv_obj_invalidate(s_spec_img);
