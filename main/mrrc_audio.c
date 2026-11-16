@@ -29,7 +29,7 @@
 static const char *TAG = "audio";
 
 #define AUD_WS_STACK   6144
-#define AUD_TASK_STACK 8192
+#define AUD_TASK_STACK 12288   /* -O2 inlines deeply: 8 KB overflowed */
 #define AUD_RB_BYTES   6144         /* ~0.8 s of 64 kbps Opus */
 #define AUD_FRAME_MAX  576          /* 60 ms @ 48 kHz mono Opus is < 200 B */
 #define AUD_PCM48_MAX  2880         /* 60 ms @ 48 kHz: what Opus decodes to */
@@ -45,6 +45,7 @@ static size_t   s_r, s_w, s_used;
 static SemaphoreHandle_t s_rb_mtx;
 static esp_websocket_client_handle_t s_ws;
 static OpusDecoder *s_dec;
+TaskHandle_t s_audio_task_h;
 
 static uint32_t s_frames, s_errors, s_drops;
 static int16_t  s_pcm48[AUD_PCM48_MAX];
@@ -264,7 +265,7 @@ void mrrc_audio_start(void)
         ESP_LOGE(TAG, "no mutex");
         return;
     }
-    if (xTaskCreate(audio_task, "audio", AUD_TASK_STACK, NULL, 8, NULL) != pdPASS) {
+    if (xTaskCreate(audio_task, "audio", AUD_TASK_STACK, NULL, 8, &s_audio_task_h) != pdPASS) {
         ESP_LOGE(TAG, "audio task failed");
         return;
     }

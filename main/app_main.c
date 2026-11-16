@@ -24,6 +24,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+
+extern TaskHandle_t s_audio_task_h;
 #include "mrrc_audio.h"
 #include "mrrc_net.h"
 #include "mrrc_tx.h"
@@ -179,6 +181,9 @@ void app_main(void)
                  (unsigned)af, (unsigned)ae, (unsigned)ad);
         unsigned k = 0, kf = 0, kfr = 0, ksf = 0, krf = 0, kld = 0;
         mrrc_tx_stats(&k, &kf, &kfr, &ksf, &krf, &kld);
+        if (s_audio_task_h)
+            ESP_LOGI(TAG, "stack: audio min free=%u B",
+                     (unsigned)(uxTaskGetStackHighWaterMark(s_audio_task_h)));
         ESP_LOGI(TAG, "tx: keys=%u fails=%u frames=%u sendfail=%u readfail=%u "
                       "linkdowns=%u last=%s",
                  k, kf, kfr, ksf, krf, kld, mrrc_tx_last_event());

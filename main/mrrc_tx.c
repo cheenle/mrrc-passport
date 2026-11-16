@@ -28,7 +28,7 @@
 
 static const char *TAG = "tx";
 
-#define TX_TASK_STACK   3072
+#define TX_TASK_STACK   4096
 #define TX_WS_STACK     4096
 #define TX_MIC_FRAME    320         /* 20 ms @ 16 kHz, what the codec captures */
 #define TX_FRAME        960         /* 20 ms @ 48 kHz: same span after 3x upsample */
@@ -41,17 +41,25 @@ static volatile bool s_want_tx;      /* key is held */
 static volatile bool s_link_up;      /* socket accepted */
 static TaskHandle_t s_task;
 static char s_last_evt[72] = "none";
+static portMUX_TYPE s_note_mux = portMUX_INITIALIZER_UNLOCKED;
 static unsigned s_keys, s_fails, s_tx_frames, s_send_fail, s_read_fail, s_link_downs;
 static int s_peak_max;      /* loudest sample seen in the last keying */
 static int s_peak_avg_sum, s_peak_avg_n;
 
+static char s_evt_buf[72];
+
+/* Called from the key task and the transmit task; the shared line is guarded so
+ * a -O2 build cannot interleave two vsnprintf() calls into one buffer. */
 static void note(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(s_last_evt, sizeof s_last_evt, fmt, ap);
+    vsnprintf(s_evt_buf, sizeof s_evt_buf, fmt, ap);
     va_end(ap);
-    ESP_LOGI(TAG, "%s", s_last_evt);
+    taskENTER_CRITICAL(&s_note_mux);
+    memcpy(s_last_evt, s_evt_buf, sizeof s_last_evt);
+    taskEXIT_CRITICAL(&s_note_mux);
+    ESP_LOGI(TAG, "%s", s_evt_buf);
 }
 
 static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
