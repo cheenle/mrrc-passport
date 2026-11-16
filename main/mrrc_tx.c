@@ -61,7 +61,7 @@ static void note(const char *fmt, ...)
     ESP_LOGI(TAG, "%s", s_evt_buf);
 }
 
-static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+static void __attribute__((unused)) ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg; (void)base; (void)data;
     switch (id) {
@@ -78,7 +78,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
-static void close_socket(void)
+static void __attribute__((unused)) close_socket(void)
 {
     if (!s_ws) return;
     esp_websocket_client_stop(s_ws);
@@ -89,6 +89,11 @@ static void close_socket(void)
 }
 
 bool mrrc_tx_open(void)
+{
+    return true;   /* single socket: the uplink is always connected */
+}
+
+static bool __attribute__((unused)) tx_open_unused(void)
 {
     if (s_ws) return s_link_up;
     char uri[320];
@@ -118,9 +123,10 @@ static void tx_task(void *arg)
     (void)arg;
     static int16_t mic[TX_MIC_FRAME];
     static int16_t up[TX_FRAME];
-    /* /WSaudioTX framing is the single-layer one: [codec][payload]. */
+    /* /WSterminal uplink framing: [0x01][payload].  The server routes 0x01
+     * frames from the owning socket into _feed_tx_from_uplink(). */
     static uint8_t frame[1 + sizeof up];
-    frame[0] = 0x00;                      /* codec: raw PCM */
+    frame[0] = 0x01;
 
     int64_t last_hb = 0;
     const int64_t started = esp_timer_get_time();
@@ -161,9 +167,7 @@ static void tx_task(void *arg)
             up[i * 3] = up[i * 3 + 1] = up[i * 3 + 2] = mic[i];
         memcpy(frame + 1, up, sizeof up);
 
-        const int sent = esp_websocket_client_send_bin(
-            s_ws, (const char *)frame, sizeof frame, pdMS_TO_TICKS(1000));
-        if (sent >= 0) {
+        if (mrrc_net_send_bin(frame, sizeof frame)) {
             s_tx_frames++;
         } else {
             s_send_fail++;
@@ -175,7 +179,7 @@ static void tx_task(void *arg)
 
     /* "s:" tells the server capture stopped; the PTT release follows from the
      * caller so the order is stop-stream -> unkey. */
-    if (s_link_up) esp_websocket_client_send_text(s_ws, "s:", 2, pdMS_TO_TICKS(500));
+    mrrc_net_send_text_stop();
     note("tx done: frames=%u sendfail=%u readfail=%u peak=%d avg=%d",
          s_tx_frames, s_send_fail, s_read_fail, s_peak_max,
          s_peak_avg_n ? s_peak_avg_sum / s_peak_avg_n : 0);
@@ -209,10 +213,9 @@ bool mrrc_tx_key(bool on)
         return true;
     }
 
-    if (!s_want_tx) { close_socket(); return true; }
+    if (!s_want_tx) return true;
     s_want_tx = false;
     for (int i = 0; i < 30 && s_task; i++) vTaskDelay(pdMS_TO_TICKS(50));
-    close_socket();
     note("unkeyed peak=%d frames=%u free=%uK",
          s_peak_max, s_tx_frames,
          (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
