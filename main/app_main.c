@@ -20,6 +20,7 @@
 #include "bsp_i2c.h"
 #include "bsp_pins.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -30,6 +31,7 @@ extern TaskHandle_t s_audio_task_h;
 #include "mrrc_net.h"
 #include "mrrc_tx.h"
 #include "mrrc_ui.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 
 static const char *TAG = "mrrc";
@@ -44,6 +46,57 @@ typedef struct {
 } key_ev_t;
 
 static QueueHandle_t s_key_q;
+
+/* Local speaker volume lives in NVS: it is a property of this terminal, not of
+ * the radio (the radio's AF gain is a separate server-side setting). */
+#define SPK_STEP 5
+#define VOL_DEFAULT 60
+static int s_spk_vol = VOL_DEFAULT;
+static ui_mode_t s_ui_mode = UI_MODE_FREQ;
+
+static void vol_load(void)
+{
+    nvs_handle_t h;
+    int32_t v = VOL_DEFAULT;
+    if (nvs_open("mrrc", NVS_READONLY, &h) == ESP_OK) {
+        (void)nvs_get_i32(h, "spk_vol", &v);
+        nvs_close(h);
+    }
+    if (v < 0) v = 0;
+    if (v > 100) v = 100;
+    s_spk_vol = (int)v;
+}
+
+static void vol_store(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("mrrc", NVS_READWRITE, &h) != ESP_OK) return;
+    (void)nvs_set_i32(h, "spk_vol", s_spk_vol);
+    (void)nvs_commit(h);
+    nvs_close(h);
+}
+
+/* One step of whichever knob is active.  Shared by the single click and the
+ * auto-repeat so both behave identically. */
+static void knob_step(bsp_btn_t btn)
+{
+    const int dir = (btn == BSP_BTN_UP) ? +1 : -1;
+
+    if (s_ui_mode == UI_MODE_VOL) {
+        s_spk_vol += dir * SPK_STEP;
+        if (s_spk_vol < 0) s_spk_vol = 0;
+        if (s_spk_vol > 100) s_spk_vol = 100;
+        bsp_audio_set_volume((uint8_t)s_spk_vol);
+        mrrc_ui_set_mode(s_ui_mode, s_spk_vol);
+        return;
+    }
+
+    mrrc_state_lock();
+    const int32_t cur = g_radio.freq_hz;
+    mrrc_state_unlock();
+    if (cur <= 0) return;
+    mrrc_net_set_freq(cur + dir * 1000);
+}
 
 static void mem_report(const char *stage)
 {
@@ -66,19 +119,34 @@ static void keys_task(void *arg)
     (void)arg;
     key_ev_t e;
     bool ptt_on = false;
-    for (;;) {
-        if (xQueueReceive(s_key_q, &e, portMAX_DELAY) != pdTRUE) continue;
+    /* Auto-repeat: hold UP/DOWN to sweep.  450 ms before the first repeat, then
+     * one step every 120 ms, matching the xz-02 handset so the muscle memory
+     * carries over. */
+    bool repeat = false;
+    bsp_btn_t repeat_btn = BSP_BTN_UP;
+    int64_t repeat_at = 0;
 
-        /* PTT: key only after the long-press threshold, never on a short
-         * press, so a double-tap can never leak carrier. */
+    for (;;) {
+        TickType_t wait = portMAX_DELAY;
+        if (repeat) {
+            const int64_t left = repeat_at - esp_timer_get_time();
+            wait = left <= 0 ? 0 : pdMS_TO_TICKS((left + 999) / 1000);
+        }
+
+        if (xQueueReceive(s_key_q, &e, wait) != pdTRUE) {
+            if (repeat) {
+                knob_step(repeat_btn);
+                repeat_at = esp_timer_get_time() + 120000;
+            }
+            continue;
+        }
+
+        /* ── PTT ─────────────────────────────────────────────────────── */
         if (e.ev == BSP_BTN_LONG && e.btn == BSP_BTN_OK && !ptt_on) {
             ptt_on = true;
-            /* Order matters:
-             *   1. free the downlink socket (room for one extra TLS session)
-             *   2. open /WSaudioTX and wait until it is accepted
-             *   3. only then send ptt:true, so server.py's owner claim finds
-             *      our uplink socket in audio_tx_clients
-             * Sending ptt first makes the radio key with no modulation. */
+            /* Order matters: free the downlink (room for one TLS session), open
+             * /WSaudioTX and wait for it to be accepted, and only then send
+             * ptt:true so server.py's owner claim finds our uplink socket. */
             mrrc_audio_suspend();
             if (!mrrc_tx_key(true)) {
                 ESP_LOGE(TAG, "TX start failed");
@@ -99,16 +167,33 @@ static void keys_task(void *arg)
             continue;
         }
 
-        if (e.ev == BSP_BTN_CLICK && (e.btn == BSP_BTN_UP || e.btn == BSP_BTN_DOWN)) {
-            mrrc_state_lock();
-            const int32_t cur = g_radio.freq_hz;
-            mrrc_state_unlock();
-            if (cur <= 0) continue;
-            const int32_t next = cur + (e.btn == BSP_BTN_UP ? 1000 : -1000);
-            mrrc_net_set_freq(next);
-            ESP_LOGI(TAG, "tune -> %ld", (long)next);
-        } else if (e.ev == BSP_BTN_LONG && e.btn == BSP_BTN_OK) {
-            mrrc_ui_set_toast("PTT: not in S1 yet");
+        /* ── knob ────────────────────────────────────────────────────── */
+        if (e.btn == BSP_BTN_UP || e.btn == BSP_BTN_DOWN) {
+            if (e.ev == BSP_BTN_RELEASE) {
+                if (repeat) {
+                    repeat = false;
+                    if (s_ui_mode == UI_MODE_VOL) vol_store();
+                }
+            } else if (e.ev == BSP_BTN_CLICK) {
+                knob_step(e.btn);
+                if (s_ui_mode == UI_MODE_VOL) vol_store();
+            } else if (e.ev == BSP_BTN_LONG) {
+                knob_step(e.btn);
+                repeat = true;
+                repeat_btn = e.btn;
+                repeat_at = esp_timer_get_time() + 450000;
+            }
+            continue;
+        }
+
+        /* ── mode switch ─────────────────────────────────────────────── */
+        if (e.ev == BSP_BTN_DOUBLE && e.btn == BSP_BTN_OK) {
+            s_ui_mode = (s_ui_mode == UI_MODE_FREQ) ? UI_MODE_VOL : UI_MODE_FREQ;
+            mrrc_ui_set_mode(s_ui_mode, s_spk_vol);
+            mrrc_ui_set_toast(s_ui_mode == UI_MODE_VOL ? "VOL: speaker" : "FREQ: tuning");
+            ESP_LOGI(TAG, "mode -> %s (spk %d%%)",
+                     s_ui_mode == UI_MODE_VOL ? "VOL" : "FREQ", s_spk_vol);
+            continue;
         }
     }
 }
@@ -159,7 +244,10 @@ void app_main(void)
     }
     mem_report("buttons");
 
+    vol_load();
     mrrc_ui_start();
+    mrrc_ui_set_mode(s_ui_mode, s_spk_vol);
+    bsp_audio_set_volume((uint8_t)s_spk_vol);
     mrrc_net_start();
     mem_report("net started");
 

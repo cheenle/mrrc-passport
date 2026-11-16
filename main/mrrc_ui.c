@@ -36,6 +36,9 @@ static lv_obj_t *s_toast;
 static uint32_t s_last_seq = 0xFFFFFFFF;
 static uint32_t s_last_meter = 0xFFFFFFFF;
 static int s_batt_pct = -1;
+static ui_mode_t s_ui_mode = UI_MODE_FREQ;
+static int s_spk_pct = 60;
+static bool s_mode_dirty = true;
 
 /* 7.215.00 — the last three digits are Hz/10, matching the xz-02 layout. */
 static void format_freq(char *out, size_t n, int32_t hz)
@@ -116,11 +119,15 @@ static void refresh(void)
         snprintf(buf, sizeof buf, "%s %c", st.mode_name[0] ? st.mode_name : "---", st.vfo);
         lv_label_set_text(s_mode, buf);
 
-        snprintf(buf, sizeof buf, "%s  %s",
-                 st.band_name[0] ? st.band_name : "----",
-                 st.filter_hz ? "" : "");
-        lv_label_set_text(s_band, buf);
-
+        /* UP/DOWN drive either the tuning knob or the speaker; show which. */
+        if (s_ui_mode == UI_MODE_VOL) {
+            snprintf(buf, sizeof buf, "SPK %d%%", s_spk_pct);
+            lv_label_set_text(s_band, buf);
+            lv_obj_set_style_text_color(s_mode, lv_color_hex(0x4FC3F7), 0);
+        } else {
+            lv_label_set_text(s_band, st.band_name[0] ? st.band_name : "----");
+            lv_obj_set_style_text_color(s_mode, lv_color_hex(0xFFB300), 0);
+        }
         const char *tx = st.tx_status == 1 ? "TX" : (st.tx_status == 2 ? "TUNE" : "RX");
         snprintf(buf, sizeof buf, "%s%s  LINK %s", tx,
                  st.radio_online ? "" : " ?", mrrc_net_up() ? "up" : "--");
@@ -168,6 +175,17 @@ void mrrc_ui_start(void)
     bsp_lvgl_unlock();
     if (xTaskCreate(ui_task, "ui", 4096, NULL, 4, NULL) != pdPASS)
         printf("ui task failed\n");
+}
+
+void mrrc_ui_set_mode(ui_mode_t mode, int volume_pct)
+{
+    if (s_ui_mode == mode && s_spk_pct == volume_pct) return;
+    s_ui_mode = mode;
+    s_spk_pct = volume_pct;
+    if (!bsp_lvgl_lock(100)) return;
+    /* Force the main-field branch on the next refresh. */
+    s_last_seq = 0xFFFFFFFF;
+    bsp_lvgl_unlock();
 }
 
 void mrrc_ui_set_battery(int percent, bool charging)
