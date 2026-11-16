@@ -31,7 +31,7 @@ static const char *TAG = "audio";
 
 #define AUD_WS_STACK   6144
 #define AUD_TASK_STACK 12288   /* -O2 inlines deeply: 8 KB overflowed */
-#define AUD_RB_BYTES   6144         /* ~0.8 s of 64 kbps Opus */
+#define AUD_RB_BYTES   4096         /* ~0.8 s of 64 kbps Opus */
 #define AUD_FRAME_MAX  576          /* 60 ms @ 48 kHz mono Opus is < 200 B */
 #define AUD_PCM48_MAX  2880         /* 60 ms @ 48 kHz: what Opus decodes to */
 #define AUD_PCM16_MAX   960         /* 60 ms @ 16 kHz: what the codec plays */
@@ -204,11 +204,9 @@ int mrrc_audio_prewarm(void)
             return -1;
         }
         /* PLC path runs the full decode prologue, which is what actually
-         * reserves the pseudostack. */
-        static int16_t pcm[AUD_PCM48_MAX];
-        /* Result intentionally ignored: this only forces the pseudostack to be
-         * reserved while the heap is still unfragmented. */
-        const int warm = opus_decode(s_dec, NULL, 0, pcm, AUD_PCM48_MAX, 0);
+         * reserves the pseudostack.  Result ignored; reuse the decode buffer
+         * rather than reserving a second 5.7 KB static array for one call. */
+        const int warm = opus_decode(s_dec, NULL, 0, s_pcm48, AUD_PCM48_MAX, 0);
         (void)warm;
     }
 
