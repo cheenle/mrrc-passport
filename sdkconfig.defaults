@@ -55,3 +55,12 @@ CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 # MRRC 终端不用 BLE。NimBLE controller + host 常驻会吃掉几十 KB 内部 RAM，
 # 而这颗 C3 的全部预算只有 400 KB（无 PSRAM）。真要蓝牙时再单独验一次内存。
 CONFIG_BT_ENABLED=n
+
+# --- Opus ---
+# micro-opus defaults to a 120 KB pseudostack.  This board has no PSRAM, so that
+# would come straight out of the ~114 KB we have left.  Measured on the host:
+# decoding overflows below 8 KB, 16 kHz encoding below 24 KB, 48 kHz below
+# 32 KB.  Only decoding happens in S2, so 16 KB leaves 2x margin.
+CONFIG_OPUS_PSEUDOSTACK_SIZE=60000
+# Fixed point: ESP32-C3 has no FPU at all (SOC_CPU_HAS_FPU is not defined).
+# CONFIG_OPUS_FLOATING_POINT is not set

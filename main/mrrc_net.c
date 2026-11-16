@@ -29,7 +29,9 @@
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mrrc_audio.h"
 #include "mrrc_net.h"
+#include "nvs.h"
 
 static const char *TAG = "net";
 
@@ -37,6 +39,9 @@ static const char *TAG = "net";
 #define WS_TASK_STACK  6144
 #define NET_TASK_STACK 6144
 #define TOKEN_MAX      256
+/* /WSradio fullState measures ~5.5 KB and arrives split across WS buffer
+ * chunks; accumulate by payload_offset before parsing. */
+#define WS_FRAME_MAX   8192
 
 mrrc_state_t g_radio;
 
@@ -45,6 +50,8 @@ static char s_token[TOKEN_MAX];
 static char s_auth_hdr[TOKEN_MAX + 32];
 static esp_websocket_client_handle_t s_ws;
 static volatile bool s_ctrl_up;
+static char s_acc[WS_FRAME_MAX];
+static size_t s_acc_len;
 
 void mrrc_state_lock(void)   { if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY); }
 void mrrc_state_unlock(void) { if (s_lock) xSemaphoreGive(s_lock); }
@@ -179,11 +186,23 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         ESP_LOGW(TAG, "/WSradio disconnected");
         s_ctrl_up = false;
         break;
-    case WEBSOCKET_EVENT_DATA:
-        /* Text frames only; the server sends binary on the audio sockets. */
-        if (ev->op_code == 0x01 && ev->data_len > 0 && ev->data_ptr)
-            handle_ctrl_text(ev->data_ptr, ev->data_len);
+    case WEBSOCKET_EVENT_DATA: {
+        /* Only text frames carry control JSON.  A frame larger than the socket
+         * buffer arrives in several events: payload_offset is the absolute
+         * position inside the whole message, so reassemble first and parse
+         * exactly once at the end.  Parsing a chunk yields "bad JSON (4096 B)". */
+        if (ev->op_code != 0x01 || ev->payload_len <= 0 || !ev->data_ptr) break;
+        if (ev->payload_len > WS_FRAME_MAX) {
+            ESP_LOGW(TAG, "message too big: %d B", ev->payload_len);
+            break;
+        }
+        if (ev->payload_offset == 0) s_acc_len = 0;
+        memcpy(s_acc + ev->payload_offset, ev->data_ptr, (size_t)ev->data_len);
+        if (ev->payload_offset + ev->data_len < ev->payload_len) break;  /* more to come */
+        s_acc_len = (size_t)ev->payload_len;
+        handle_ctrl_text(s_acc, (int)s_acc_len);
         break;
+    }
     case WEBSOCKET_EVENT_ERROR:
         ESP_LOGE(TAG, "/WSradio error");
         break;
@@ -198,6 +217,9 @@ static void ws_send_text(const char *text)
     esp_websocket_client_send_text(s_ws, text, (int)strlen(text), pdMS_TO_TICKS(1000));
 }
 
+const char *mrrc_auth_header(void) { return s_auth_hdr; }
+const char *mrrc_token(void) { return s_token; }
+
 void mrrc_net_set_freq(int32_t hz)
 {
     char msg[64];
@@ -210,6 +232,34 @@ void mrrc_net_set_af_gain(int gain)
     char msg[64];
     snprintf(msg, sizeof msg, "{\"type\":\"set\",\"field\":\"af_gain\",\"value\":%d}", gain);
     ws_send_text(msg);
+}
+
+/* ── token persistence ───────────────────────────────────────────────────
+ * The server keeps `_auth_tokens` in process memory with no TTL, so a token
+ * stays valid until the server restarts.  Caching it in NVS means a reboot
+ * (which happens on every flash during development) does not consume one of
+ * the 5 logins per 5 minutes that /api/auth/login allows per IP. */
+
+static void token_store(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("mrrc", NVS_READWRITE, &h) != ESP_OK) return;
+    if (s_token[0]) (void)nvs_set_str(h, "token", s_token);
+    else (void)nvs_erase_key(h, "token");
+    (void)nvs_commit(h);
+    nvs_close(h);
+}
+
+static void token_load(void)
+{
+    nvs_handle_t h;
+    size_t len = sizeof s_token;
+    if (nvs_open("mrrc", NVS_READONLY, &h) != ESP_OK) return;
+    if (nvs_get_str(h, "token", s_token, &len) == ESP_OK && s_token[0]) {
+        snprintf(s_auth_hdr, sizeof s_auth_hdr, "Authorization: Bearer %s\r\n", s_token);
+        ESP_LOGI(TAG, "reusing cached token");
+    }
+    nvs_close(h);
 }
 
 /* ── login ───────────────────────────────────────────────────────────── */
@@ -256,6 +306,7 @@ static bool mrrc_login(void)
     if (ok) {
         snprintf(s_token, sizeof s_token, "%s", tok->valuestring);
         snprintf(s_auth_hdr, sizeof s_auth_hdr, "Authorization: Bearer %s\r\n", s_token);
+        token_store();
         ESP_LOGI(TAG, "logged in");
     }
     cJSON_Delete(root);
@@ -316,9 +367,12 @@ static bool wifi_up(void)
 static void start_ws(void)
 {
     if (s_ws) return;
-    char uri[160];
-    snprintf(uri, sizeof uri, "wss://%s:%d/WSradio",
-             CONFIG_MRRC_SERVER_HOST, CONFIG_MRRC_SERVER_PORT);
+    /* server.py checks `?token=` (ws.query_params), NOT the Authorization
+     * header: a browser WebSocket cannot set headers.  Sending both satisfies
+     * either server version. */
+    char uri[320];
+    snprintf(uri, sizeof uri, "wss://%s:%d/WSradio?token=%s",
+             CONFIG_MRRC_SERVER_HOST, CONFIG_MRRC_SERVER_PORT, s_token);
 
     esp_websocket_client_config_t cfg = {
         .uri = uri,
@@ -353,17 +407,38 @@ static void net_task(void *arg)
      * so back off exponentially (30 s doubling to 10 min) and reset on
      * success. */
     uint32_t backoff_s = 30;
+    bool audio_started = false;
     for (;;) {
         if (!s_ws) {
-            if (mrrc_login()) {
+            if (!s_token[0]) {
+                if (!mrrc_login()) {
+                    ESP_LOGW(TAG, "login failed, retry in %us", (unsigned)backoff_s);
+                    vTaskDelay(pdMS_TO_TICKS(backoff_s * 1000));
+                    backoff_s = backoff_s * 2 > 600 ? 600 : backoff_s * 2;
+                    continue;
+                }
                 backoff_s = 30;
-                start_ws();
-            } else {
-                ESP_LOGW(TAG, "login failed, retry in %us", (unsigned)backoff_s);
-                vTaskDelay(pdMS_TO_TICKS(backoff_s * 1000));
-                backoff_s = backoff_s * 2 > 600 ? 600 : backoff_s * 2;
+            }
+            start_ws();
+            /* Give the socket time to come up; a cached token rejected by the
+             * server shows up as "never connected", not as an error event. */
+            vTaskDelay(pdMS_TO_TICKS(12000));
+            if (!s_ctrl_up) {
+                ESP_LOGW(TAG, "no control link with cached token; re-login");
+                esp_websocket_client_destroy(s_ws);
+                s_ws = NULL;
+                s_token[0] = 0;
+                s_auth_hdr[0] = 0;
+                token_store();
                 continue;
             }
+            if (!audio_started) {
+                /* The audio socket needs the token, so it can only start once
+                 * the control link is proven. */
+                audio_started = true;
+                mrrc_audio_start();
+            }
+            continue;
         } else if (!esp_websocket_client_is_connected(s_ws)) {
             /* The client reconnects on its own; only rebuild (and re-login)
              * when it has been down long enough that the token may be stale. */
@@ -388,6 +463,7 @@ void mrrc_net_start(void)
         ESP_LOGE(TAG, "no mutex");
         return;
     }
+    token_load();
     if (xTaskCreate(net_task, "net", NET_TASK_STACK, NULL, 5, NULL) != pdPASS)
         ESP_LOGE(TAG, "net task failed");
 }

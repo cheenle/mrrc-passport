@@ -24,6 +24,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "mrrc_audio.h"
 #include "mrrc_net.h"
 #include "mrrc_ui.h"
 #include "nvs_flash.h"
@@ -134,10 +135,14 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(30000));
         const int soc = bsp_battery_soc();
         if (soc >= 0) mrrc_ui_set_battery(soc, false);
-        ESP_LOGI(TAG, "idle free=%uK largest=%uK freq=%ld s=%d glitch=%u",
+        uint32_t af = 0, ae = 0, ad = 0;
+        mrrc_audio_stats(&af, &ae, &ad);
+        ESP_LOGI(TAG, "idle free=%uK largest=%uK freq=%ld s=%d glitch=%u "
+                      "audio(frames=%u err=%u drop=%u)",
                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
                  (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
                  (long)g_radio.freq_hz, g_radio.s_meter,
-                 (unsigned)bsp_button_glitch_count());
+                 (unsigned)bsp_button_glitch_count(),
+                 (unsigned)af, (unsigned)ae, (unsigned)ad);
     }
 }

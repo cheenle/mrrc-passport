@@ -40,3 +40,9 @@ bool mrrc_net_up(void);
 /* Control writes (server-side: {"type":"set","field":...,"value":...}). */
 void mrrc_net_set_freq(int32_t hz);
 void mrrc_net_set_af_gain(int gain);
+
+/* "Authorization: Bearer ...\r\n", valid after the first successful login. */
+const char *mrrc_auth_header(void);
+
+/* Raw token, for the ?token= query the server actually checks. */
+const char *mrrc_token(void);

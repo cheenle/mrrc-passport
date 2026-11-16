@@ -63,6 +63,9 @@ ssh "$MAC" "cd $REMOTE && { [ ! -f sdkconfig ] || \
     [ $(grep -c . sdkconfig.defaults) -gt 0 ] && \
     [ sdkconfig -ot sdkconfig.defaults ]; } && rm -f sdkconfig sdkconfig.old || true" >/dev/null 2>&1
 
+echo "== patch micro-opus (pseudostack + TLS mode) =="
+ssh "$MAC" "cd $REMOTE && ./tools/patch_microopus.sh" || true
+
 echo "== build on mac-mini =="
 ssh "$MAC" "cd $REMOTE && $PROXY_ENV zsh -c '. ~/esp-idf/export.sh >/dev/null 2>&1; idf.py build'" 2>&1 | tail -20
 
