@@ -8,8 +8,10 @@
 //   release         -> stop streaming, "s:", ptt:false
 //   180 s held      -> force release locally
 //
-// The uplink rides on the same /WSterminal socket as control and downlink, so
-// there is no socket to open per transmission and no TLS handshake on key-up.
+// The uplink uses its own /WSaudioTX socket.  Control (ptt/txhb) still goes out
+// on /WSterminal; only the audio needs the dedicated endpoint, because
+// /WSterminal's binary uplink is not wired to the server's TX audio path
+// (verified: ptt flips tx_status to 1 while frames produce no tx_mic_db).
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -20,6 +22,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_websocket_client.h"
 #include "mrrc_net.h"
 #include "mrrc_tx.h"
 
@@ -31,7 +34,9 @@ static const char *TAG = "tx";
 #define TX_MAX_HOLD_MS  180000
 #define TX_HB_MS        1500
 
+static esp_websocket_client_handle_t s_ws;
 static volatile bool s_want_tx;
+static volatile bool s_link_up;
 static TaskHandle_t s_task;
 
 static char s_last_evt[80] = "none";
@@ -56,13 +61,66 @@ static void note(const char *fmt, ...)
     ESP_LOGI(TAG, "%s", s_evt_buf);
 }
 
+static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg; (void)base; (void)data;
+    switch (id) {
+    case WEBSOCKET_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "/WSaudioTX connected");
+        s_link_up = true;
+        break;
+    case WEBSOCKET_EVENT_DISCONNECTED:
+        ESP_LOGW(TAG, "/WSaudioTX disconnected");
+        s_link_up = false;
+        break;
+    default:
+        break;
+    }
+}
+
+static void close_socket(void)
+{
+    if (!s_ws) return;
+    esp_websocket_client_stop(s_ws);
+    vTaskDelay(pdMS_TO_TICKS(100));   /* let queued events drain */
+    esp_websocket_client_destroy(s_ws);
+    s_ws = NULL;
+    s_link_up = false;
+}
+
+bool mrrc_tx_open(void)
+{
+    if (s_ws) return s_link_up;
+    char uri[320];
+    snprintf(uri, sizeof uri, "wss://%s:%d/WSaudioTX?token=%s",
+             CONFIG_MRRC_SERVER_HOST, CONFIG_MRRC_SERVER_PORT, mrrc_token());
+    esp_websocket_client_config_t cfg = {
+        .uri = uri,
+        .headers = mrrc_auth_header(),
+        .buffer_size = 4096,        /* one frame is 1 + 1920 B */
+        .task_stack = 4096,
+        .network_timeout_ms = 8000,
+        .ping_interval_sec = 15,
+        .pingpong_timeout_sec = 25,
+        .skip_cert_common_name_check = true,
+    };
+    s_ws = esp_websocket_client_init(&cfg);
+    if (!s_ws) { ESP_LOGE(TAG, "ws init failed"); return false; }
+    esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
+    esp_websocket_client_start(s_ws);
+    for (int i = 0; i < 60 && !s_link_up; i++) vTaskDelay(pdMS_TO_TICKS(50));
+    if (!s_link_up) { note("uplink never connected"); close_socket(); return false; }
+    return true;
+}
+
 static void tx_task(void *arg)
 {
     (void)arg;
     static int16_t mic[TX_MIC_FRAME];
     static int16_t up[TX_FRAME];
+    /* /WSaudioTX framing is the single-layer one: [codec][payload]. */
     static uint8_t frame[1 + sizeof up];
-    frame[0] = 0x00;                      /* PCM tag */
+    frame[0] = 0x00;                      /* codec: raw PCM */
 
     int64_t last_hb = 0;
     const int64_t started = esp_timer_get_time();
@@ -103,7 +161,9 @@ static void tx_task(void *arg)
             up[i * 3] = up[i * 3 + 1] = up[i * 3 + 2] = mic[i];
         memcpy(frame + 1, up, sizeof up);
 
-        if (mrrc_net_send_bin(frame, sizeof frame)) {
+        const int sent = esp_websocket_client_send_bin(
+            s_ws, (const char *)frame, sizeof frame, pdMS_TO_TICKS(1000));
+        if (sent >= 0) {
             s_tx_frames++;
         } else {
             s_send_fail++;
@@ -115,7 +175,7 @@ static void tx_task(void *arg)
 
     /* "s:" tells the server capture stopped; the PTT release follows from the
      * caller so the order is stop-stream -> unkey. */
-    mrrc_net_send_text_stop();
+    if (s_link_up) esp_websocket_client_send_text(s_ws, "s:", 2, pdMS_TO_TICKS(500));
     note("tx done: frames=%u sendfail=%u readfail=%u peak=%d avg=%d",
          s_tx_frames, s_send_fail, s_read_fail, s_peak_max,
          s_peak_avg_n ? s_peak_avg_sum / s_peak_avg_n : 0);
@@ -149,9 +209,10 @@ bool mrrc_tx_key(bool on)
         return true;
     }
 
-    if (!s_want_tx) return true;
+    if (!s_want_tx) { close_socket(); return true; }
     s_want_tx = false;
     for (int i = 0; i < 30 && s_task; i++) vTaskDelay(pdMS_TO_TICKS(50));
+    close_socket();
     note("unkeyed peak=%d frames=%u free=%uK",
          s_peak_max, s_tx_frames,
          (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));

@@ -14,6 +14,9 @@
  * a LAN.
  *
  * Requires the codec to be open (S2 does that at boot). */
+/* Open the uplink socket and wait until it is accepted.  Must happen BEFORE the
+ * caller sends ptt:true, so the server's TX-owner claim finds this socket. */
+bool mrrc_tx_open(void);
 bool mrrc_tx_key(bool on);
 bool mrrc_tx_active(void);
 

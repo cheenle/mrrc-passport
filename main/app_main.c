@@ -161,6 +161,14 @@ static void keys_task(void *arg)
              * the radio first, give it time to open its audio path, then
              * stream. */
             mrrc_audio_suspend();
+            /* Open the uplink first: server.py claims TX ownership by scanning
+             * audio_tx_clients, so the socket must exist before ptt:true. */
+            if (!mrrc_tx_open()) {
+                ESP_LOGE(TAG, "uplink unavailable");
+                mrrc_audio_resume();
+                ptt_on = false;
+                continue;
+            }
             mrrc_net_set_ptt(true);
             vTaskDelay(pdMS_TO_TICKS(200));
             if (!mrrc_tx_key(true)) {
