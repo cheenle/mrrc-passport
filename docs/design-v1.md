@@ -254,7 +254,37 @@ V1 只开 **2 条**：
 
 **V1 的设计不依赖它，V2 才需要。**
 
-## 10. 里程碑
+## 9.3 实现踩到的两个坑（S1）
+
+**① `MBEDTLS_SSL_IN_CONTENT_LEN` 压得太小，WebSocket 一收数据就断**
+
+第一版为了省内存设成 2048 / 1024，结果 WS 握手成功后立刻报：
+
+```
+E esp-tls-mbedtls: read error :-0x7100
+E transport_base: esp_tls_conn_read error, errno=Connection already in progress
+E websocket_client: esp_transport_read() failed with -28928
+```
+
+原因：服务端第一帧 `fullState` 的 JSON 超过了 TLS 记录缓冲，握手能成（小包），一读业务数据就碎。改成 **6144 / 2048**（与 xz-02 一致）后正常。
+内存代价：TLS 会话从 12 KB 升到约 16 KB，仍无压力。
+
+**② `/api/auth/login` 限流 5 次 / 5 分钟 / IP**
+
+`server.py:218` 写死 `_LOGIN_MAX_ATTEMPTS = 5`、`_LOGIN_WINDOW_SECONDS = 300`。开发期间反复烧录重启，每次开机都登录，很容易触发 429；固件若用固定短间隔（3 s）重试，会把自己永远锁在窗口里。
+
+固件侧已改为 **指数退避**：30 s → 60 → 120 → 240 → 600（上限）。成功则重置。
+
+开发建议：调试期间把服务端限流放宽（如 20 次/5 分钟），或把 token 存 NVS 复用。两条都不做的话，每次改固件验证要等 5 分钟。
+
+## 9.4 通道与延迟
+
+| 用途 | 通道 | 连接策略 |
+|---|---|---|
+| 控制 + 状态 + S 表 | `/WSradio` | 常驻 |
+| 下行音频 | `/WSaudioRX` | 常驻（S2） |
+| 上行音频 | `/WSaudioTX` | PTT 期间按需连接（S3） |
+
 
 | 阶段 | 内容 | 退出标准 |
 |---|---|---|
