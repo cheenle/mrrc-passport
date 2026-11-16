@@ -123,6 +123,11 @@ static void keys_task(void *arg)
      * one step every 120 ms, matching the xz-02 handset so the muscle memory
      * carries over. */
     bool repeat = false;
+    /* iot_button's BUTTON_DOUBLE_CLICK never fires on this board: the BSP key
+     * lock reports the release 120 ms late, so the second tap lands inside the
+     * first tap's hold window and the driver sees one long press.  Count two
+     * clicks ourselves; a single OK click has no other meaning. */
+    int64_t ok_click_us = 0;
     bsp_btn_t repeat_btn = BSP_BTN_UP;
     int64_t repeat_at = 0;
 
@@ -186,7 +191,21 @@ static void keys_task(void *arg)
             continue;
         }
 
-        /* ── mode switch ─────────────────────────────────────────────── */
+        /* ── mode switch (two OK clicks within 700 ms) ───────────────── */
+        if (e.ev == BSP_BTN_CLICK && e.btn == BSP_BTN_OK) {
+            const int64_t now = esp_timer_get_time();
+            if (ok_click_us && now - ok_click_us < 700000) {
+                ok_click_us = 0;
+                s_ui_mode = (s_ui_mode == UI_MODE_FREQ) ? UI_MODE_VOL : UI_MODE_FREQ;
+                mrrc_ui_set_mode(s_ui_mode, s_spk_vol);
+                mrrc_ui_set_toast(s_ui_mode == UI_MODE_VOL ? "VOL: speaker" : "FREQ: tuning");
+                ESP_LOGI(TAG, "mode -> %s (spk %d%%)",
+                         s_ui_mode == UI_MODE_VOL ? "VOL" : "FREQ", s_spk_vol);
+            } else {
+                ok_click_us = now;
+            }
+            continue;
+        }
         if (e.ev == BSP_BTN_DOUBLE && e.btn == BSP_BTN_OK) {
             s_ui_mode = (s_ui_mode == UI_MODE_FREQ) ? UI_MODE_VOL : UI_MODE_FREQ;
             mrrc_ui_set_mode(s_ui_mode, s_spk_vol);

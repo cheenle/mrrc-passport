@@ -247,7 +247,17 @@ static void audio_ws_open(void)
 void mrrc_audio_suspend(void)
 {
     if (!s_ws) return;
+    /* Order matters and is easy to get wrong: stop() is what guarantees the
+     * client task has exited, unregister drops any queued event whose payload
+     * points into the client's own buffers, and only then is it safe to free.
+     * Destroying without unregistering produced a Load access fault right
+     * after the uplink socket was torn down. */
     esp_websocket_client_stop(s_ws);
+    /* stop() joins the client task, but the event loop may still have queued
+     * callbacks whose payload points into the client's buffers.  Give them a
+     * moment to drain before freeing, otherwise destroy() produces a Load
+     * access fault. */
+    vTaskDelay(pdMS_TO_TICKS(100));
     esp_websocket_client_destroy(s_ws);
     s_ws = NULL;
     if (xSemaphoreTake(s_rb_mtx, portMAX_DELAY) == pdTRUE) {

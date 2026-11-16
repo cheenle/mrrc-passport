@@ -168,6 +168,7 @@ static void close_socket(void)
 {
     if (!s_ws) return;
     esp_websocket_client_stop(s_ws);
+    vTaskDelay(pdMS_TO_TICKS(100));   /* let queued events drain */
     esp_websocket_client_destroy(s_ws);
     s_ws = NULL;
     s_link_up = false;
