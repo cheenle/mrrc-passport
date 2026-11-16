@@ -23,6 +23,7 @@
 #include "freertos/task.h"
 #include "mrrc_audio.h"
 #include "mrrc_net.h"
+#include "mrrc_tx.h"
 #include "opus.h"
 
 static const char *TAG = "audio";
@@ -38,6 +39,9 @@ static size_t   s_r, s_w, s_used;
 static SemaphoreHandle_t s_rb_mtx;
 static esp_websocket_client_handle_t s_ws;
 static OpusDecoder *s_dec;
+static OpusEncoder *s_enc;
+#define TX_RATE 16000
+#define TX_FRAME 960        /* 60 ms at 16 kHz, the rate the server expects */
 
 static uint32_t s_frames, s_errors, s_drops;
 static int16_t  s_pcm[AUD_PCM_MAX];
@@ -161,11 +165,63 @@ static void audio_task(void *arg)
             continue;
         }
         s_frames++;
+        /* Half duplex: drop playback while the transmitter is keyed.  Feeding
+         * our own uplink back through the speaker is a howl, not audio. */
+        if (mrrc_tx_active()) continue;
         /* Blocking on the I2S DMA is what paces this loop; the codec's
          * auto_clear_after_cb fills silence when we are late. */
         if (bsp_audio_write(s_pcm, (size_t)got * sizeof(int16_t)) != ESP_OK)
             s_errors++;
     }
+}
+
+int mrrc_audio_prewarm(void)
+{
+    int err = 0;
+
+    if (!s_dec) {
+        s_dec = opus_decoder_create(48000, 1, &err);
+        if (err != OPUS_OK || !s_dec) {
+            ESP_LOGE(TAG, "decoder create failed: %d", err);
+            s_dec = NULL;
+            return -1;
+        }
+        /* PLC path runs the full decode prologue, which is what actually
+         * reserves the pseudostack. */
+        static int16_t pcm[AUD_PCM_MAX];
+        (void)opus_decode(s_dec, NULL, 0, pcm, AUD_PCM_MAX, 0);
+    }
+
+    /* No encoder: the uplink is raw 48 kHz PCM (server resamples), so the
+     * 15 KB instance and the 24 KB encode pseudostack are not needed. */
+    if (0 && !s_enc) {
+        s_enc = opus_encoder_create(TX_RATE, 1, OPUS_APPLICATION_AUDIO, &err);
+        if (err != OPUS_OK || !s_enc) {
+            ESP_LOGE(TAG, "encoder create failed: %d", err);
+            s_enc = NULL;
+            return -1;
+        }
+        opus_encoder_ctl(s_enc, OPUS_SET_BITRATE(16000));
+        opus_encoder_ctl(s_enc, OPUS_SET_COMPLEXITY(0));
+        opus_encoder_ctl(s_enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+        opus_encoder_ctl(s_enc, OPUS_SET_INBAND_FEC(1));
+        opus_encoder_ctl(s_enc, OPUS_SET_PACKET_LOSS_PERC(10));
+
+        static int16_t silence[TX_FRAME];
+        static uint8_t probe[512];
+        const int n = opus_encode(s_enc, silence, TX_FRAME, probe, sizeof probe);
+        if (n < 0) {
+            ESP_LOGE(TAG, "encoder warmup failed: %s", opus_strerror(n));
+            opus_encoder_destroy(s_enc);
+            s_enc = NULL;
+            return -1;
+        }
+    }
+
+    ESP_LOGI(TAG, "opus prewarm ok: free=%uK largest=%uK",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
+    return 0;
 }
 
 void mrrc_audio_start(void)

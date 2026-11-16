@@ -41,6 +41,11 @@ bool mrrc_net_up(void);
 void mrrc_net_set_freq(int32_t hz);
 void mrrc_net_set_af_gain(int gain);
 
+/* Keying.  The server force-releases a session that stops sending {"type":
+ * "txhb"} for 5 s, so the TX task must heartbeat every 1.5 s. */
+void mrrc_net_set_ptt(bool on);
+void mrrc_net_send_txhb(void);
+
 /* "Authorization: Bearer ...\r\n", valid after the first successful login. */
 const char *mrrc_auth_header(void);
 

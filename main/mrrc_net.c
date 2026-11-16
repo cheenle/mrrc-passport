@@ -227,6 +227,17 @@ void mrrc_net_set_freq(int32_t hz)
     ws_send_text(msg);
 }
 
+void mrrc_net_set_ptt(bool on)
+{
+    char msg[64];
+    snprintf(msg, sizeof msg, "{\"type\":\"set\",\"field\":\"ptt\",\"value\":%s}",
+             on ? "true" : "false");
+    ws_send_text(msg);
+    ESP_LOGI(TAG, "PTT %s", on ? "ON" : "OFF");
+}
+
+void mrrc_net_send_txhb(void) { ws_send_text("{\"type\":\"txhb\"}"); }
+
 void mrrc_net_set_af_gain(int gain)
 {
     char msg[64];

@@ -9,7 +9,10 @@
 
 static const char *TAG = "bsp_lvgl";
 
-#define BSP_LVGL_DRAW_BUFFER_LINES 40
+/* 8 lines: this terminal needs the internal RAM for Opus.  40 lines
+ * (19.2 KB) left the largest free block at 9 KB, which is below the 15 KB
+ * an Opus encoder needs. */
+#define BSP_LVGL_DRAW_BUFFER_LINES 8
 
 static lv_display_t *s_disp;
 static bool s_port_initialized;

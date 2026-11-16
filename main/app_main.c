@@ -26,6 +26,7 @@
 #include "freertos/task.h"
 #include "mrrc_audio.h"
 #include "mrrc_net.h"
+#include "mrrc_tx.h"
 #include "mrrc_ui.h"
 #include "nvs_flash.h"
 
@@ -62,10 +63,32 @@ static void keys_task(void *arg)
 {
     (void)arg;
     key_ev_t e;
+    bool ptt_on = false;
     for (;;) {
         if (xQueueReceive(s_key_q, &e, portMAX_DELAY) != pdTRUE) continue;
 
-        /* S1: only tuning.  PTT / volume switching arrive in S3. */
+        /* PTT: key only after the long-press threshold, never on a short
+         * press, so a double-tap can never leak carrier. */
+        if (e.ev == BSP_BTN_LONG && e.btn == BSP_BTN_OK && !ptt_on) {
+            ptt_on = true;
+            mrrc_net_set_ptt(true);
+            /* The server has to key the radio and reopen its TX stream; racing
+             * that with audio is what produces the first-frame click. */
+            vTaskDelay(pdMS_TO_TICKS(200));
+            if (!mrrc_tx_key(true)) {
+                ESP_LOGE(TAG, "TX start failed");
+                mrrc_net_set_ptt(false);
+                ptt_on = false;
+            }
+            continue;
+        }
+        if (e.ev == BSP_BTN_RELEASE && e.btn == BSP_BTN_OK && ptt_on) {
+            ptt_on = false;
+            mrrc_tx_key(false);
+            mrrc_net_set_ptt(false);
+            continue;
+        }
+
         if (e.ev == BSP_BTN_CLICK && (e.btn == BSP_BTN_UP || e.btn == BSP_BTN_DOWN)) {
             mrrc_state_lock();
             const int32_t cur = g_radio.freq_hz;
@@ -109,6 +132,7 @@ void app_main(void)
     } else {
         ESP_LOGE(TAG, "audio init failed");
     }
+    mrrc_audio_prewarm();   /* reserve Opus memory before Wi-Fi fragments the heap */
     mem_report("audio");
 
     if (bsp_battery_init() == ESP_OK)
