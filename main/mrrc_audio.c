@@ -1,18 +1,17 @@
-// main/mrrc_audio.c — downlink audio: Opus decode -> 48k->16k -> I2S -> ES8311.
+// main/mrrc_audio.c — downlink audio: 16 kHz Int16 PCM -> I2S -> ES8311.
 // Frames arrive from mrrc_net on the shared /WSterminal socket.
 //
 // Wire format (same as the xz-02 firmware, verified against server.py):
-//     1 byte tag + payload,   0x00 = raw PCM, 0x01 = Opus @ 48 kHz mono
+//     1 byte marker + 1 byte codec + payload,   0x00 = PCM @ 16 kHz mono
 //
 // Why the codec runs at 48 kHz and never changes: the ES8311 shares
 // MCLK/BCLK/WS between playback and capture, so both directions must run at one
 // rate.  The server's downlink is 48 kHz Opus, so 48 kHz it is; S3 will decimate
 // the microphone to 16 kHz in software before encoding.
 //
-// The decoder is created lazily inside the audio task, which also owns the I2S
-// writes.  micro-opus 0.4.1 allocates its pseudostack on first use (16 KB here,
-// see sdkconfig), and keeping one task on both sides means a jitter-buffer
-// stall can never race a decode.
+// Audio is plain Int16 PCM at 16 kHz in both directions: no codec is linked in.
+// The ESP32-C3 has no headroom to spare for Opus, and the wire format already
+// carries a PCM tag, so the samples go to the codec unchanged.
 #include <string.h>
 
 #include "bsp_audio.h"
@@ -25,32 +24,30 @@
 #include "mrrc_audio.h"
 #include "mrrc_net.h"
 #include "mrrc_tx.h"
-#include "opus.h"
 
 static const char *TAG = "audio";
 
 #define AUD_WS_STACK   6144
 #define AUD_TASK_STACK 8192
-#define AUD_RB_BYTES   4096         /* ~0.8 s of 64 kbps Opus */
-#define AUD_FRAME_MAX  576          /* 60 ms @ 48 kHz mono Opus is < 200 B */
-#define AUD_PCM48_MAX  2880         /* 60 ms @ 48 kHz: what Opus decodes to */
-
+/* PCM is uncompressed: 16 kHz mono is 32 kB/s, so the ring holds ~0.26 s and a
+ * frame slot must fit the largest packet the server sends.  The server
+ * coalesces downlink in 20 ms units (640 B), but bursts are possible, so allow
+ * 60 ms — the same span the Opus path used to cover. */
+#define AUD_RB_BYTES   8192         /* ~0.26 s of 16 kHz PCM */
+#define AUD_FRAME_MAX  1920         /* 60 ms @ 16 kHz mono */
 /* The codec runs at 16 kHz, not 48 kHz.  Measured on this board: the ES8311
  * ADC delivers ~468 peak at 48 kHz and ~12708 at 16 kHz for the same speech —
  * the microphone path is effectively dead at 48 kHz (ai-passport's own demo
- * only ever uses 16 kHz).  The downlink therefore decimates 3:1 after decode. */
+ * only ever uses 16 kHz).  Everything downstream is 16 kHz as a result. */
 
 static uint8_t  s_rb[AUD_RB_BYTES];
 static size_t   s_r, s_w, s_used;
 static SemaphoreHandle_t s_rb_mtx;
-static OpusDecoder *s_dec;
 TaskHandle_t s_audio_task_h;
 
 static uint32_t s_frames, s_errors, s_drops;
 static volatile bool s_muted;
 static int s_feed_dbg;    /* first few frames: what do the bytes look like? */   /* downlink muted while transmitting */
-static int64_t  s_dec_us;      /* accumulated opus_decode time */
-static int16_t  s_pcm48[AUD_PCM48_MAX];
 
 /* ── jitter buffer ───────────────────────────────────────────────────── */
 
@@ -112,75 +109,28 @@ static void audio_task(void *arg)
             continue;
         }
 
-        if (!s_dec) {
-            /* micro-opus allocates its pseudostack lazily on the first decode
-             * and does not check the result; a NULL there shows up as
-             * "Store access fault, MTVAL=0" deep inside libopus.  Print the
-             * state right before so the failure is attributable. */
-            ESP_LOGI(TAG, "before decode: free=%uK largest=%uK",
-                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-                     (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
-            int err = 0;
-            s_dec = opus_decoder_create(48000, 1, &err);
-            if (err != OPUS_OK || !s_dec) {
-                ESP_LOGE(TAG, "decoder create failed: %d", err);
-                s_dec = NULL;
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                continue;
-            }
-            ESP_LOGI(TAG, "opus decoder ready (48 kHz mono)");
-        }
-
-#if CONFIG_MRRC_PROFILE
-        const int64_t t0 = esp_timer_get_time();
-#endif
-        const int got = opus_decode(s_dec, frame, (opus_int32)n, s_pcm48, AUD_PCM48_MAX, 0);
-#if CONFIG_MRRC_PROFILE
-        s_dec_us += esp_timer_get_time() - t0;
-#endif
-        if (got <= 0) {
-            s_errors++;
-            if ((s_errors & 0x7F) == 1) ESP_LOGW(TAG, "decode error %s", opus_strerror(got));
-            continue;
-        }
+        /* The uplink is plain 16 kHz Int16 PCM — no codec, no rate change.
+         * The server downsamples for us, so the captured buffer goes to I2S
+         * unchanged. */
         s_frames++;
         /* Half duplex: drop playback while the transmitter is keyed.  Feeding
          * our own uplink back through the speaker is a howl, not audio. */
         if (s_muted || mrrc_tx_active()) continue;
-        /* 48 kHz -> 16 kHz in place: a 3-tap average is both the decimation
-         * filter and a cheap anti-alias (SSB passband is 3 kHz).  The write
-         * index always trails the read index, so no second buffer is needed. */
-        int out = 0;
-        for (int i = 0; i + 2 < got; i += 3) {
-            s_pcm48[out++] = (int16_t)((s_pcm48[i] + s_pcm48[i + 1] + s_pcm48[i + 2]) / 3);
-        }
-        if (out <= 0) continue;
-        /* Blocking on the I2S DMA is what paces this loop; the codec's
-         * auto_clear_after_cb fills silence when we are late. */
-        if (bsp_audio_write(s_pcm48, (size_t)out * sizeof(int16_t)) != ESP_OK)
+
+        const size_t samples = (n / sizeof(int16_t));
+        if (samples == 0) continue;
+        /* The ring buffer hands back whole bytes; a stray odd byte would
+         * misalign every following sample, so drop it. */
+        if (bsp_audio_write((const int16_t *)frame, samples * sizeof(int16_t)) != ESP_OK)
             s_errors++;
     }
 }
 
 int mrrc_audio_prewarm(void)
 {
-    int err = 0;
-
-    if (!s_dec) {
-        s_dec = opus_decoder_create(48000, 1, &err);
-        if (err != OPUS_OK || !s_dec) {
-            ESP_LOGE(TAG, "decoder create failed: %d", err);
-            s_dec = NULL;
-            return -1;
-        }
-        /* PLC path runs the full decode prologue, which is what actually
-         * reserves the pseudostack.  Result ignored; reuse the decode buffer
-         * rather than reserving a second 5.7 KB static array for one call. */
-        const int warm = opus_decode(s_dec, NULL, 0, s_pcm48, AUD_PCM48_MAX, 0);
-        (void)warm;
-    }
-
-    ESP_LOGI(TAG, "opus prewarm ok: free=%uK largest=%uK",
+    /* Nothing to warm: with libopus gone there is no lazily-allocated
+     * pseudostack to reserve.  Kept as a no-op so startup order is unchanged. */
+    ESP_LOGI(TAG, "audio ready (PCM 16 kHz, no codec) free=%uK largest=%uK",
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
              (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
     return 0;
@@ -192,18 +142,17 @@ void mrrc_audio_feed(const uint8_t *data, size_t len)
 
     /* Two framings share this function:
      *
-     *   /WSterminal  [0x00][codec][payload]   -- codec 0x01 = Opus
-     *   /WSaudioRX   [codec][payload]
+     *   /WSterminal  [0x00][codec][payload]
      *
-     * Layer one is the transport marker; layer two is what the standalone
-     * audio socket used alone.  Feeding the codec byte into libopus is what
-     * produced "corrupted stream" on a third of the frames. */
+     * Layer one is the transport marker, layer two the codec tag.  Only PCM is
+     * accepted now; an Opus frame is dropped because there is no decoder. */
     if (data[0] == 0x00 && (data[1] == 0x00 || data[1] == 0x01)) {
-        if (data[1] == 0x01) rb_put(data + 2, len - 2);   /* Opus */
-        /* codec 0x00 would be raw PCM; this profile never sends it. */
+        /* transport marker + codec byte.  0x00 = PCM (the only format this
+         * build can play); 0x01 = Opus, which is no longer linked in. */
+        if (data[1] == 0x00) rb_put(data + 2, len - 2);
         return;
     }
-    if (data[0] == 0x01) rb_put(data + 1, len - 1);
+    if (data[0] == 0x00) rb_put(data + 1, len - 1);
 }
 
 void mrrc_audio_suspend(void)
@@ -242,5 +191,5 @@ void mrrc_audio_stats(uint32_t *frames, uint32_t *errors, uint32_t *drops)
 void mrrc_audio_profile(uint32_t *frames, int64_t *dec_us)
 {
     if (frames) *frames = s_frames;
-    if (dec_us) *dec_us = s_dec_us;
+    if (dec_us) *dec_us = 0;      /* no decoder to time any more */
 }

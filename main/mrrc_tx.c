@@ -24,7 +24,11 @@ static const char *TAG = "tx";
 
 #define TX_TASK_STACK   4096
 #define TX_MIC_FRAME    320         /* 20 ms @ 16 kHz captured by the codec */
-#define TX_FRAME        960         /* 20 ms @ 48 kHz after 3x expansion */
+#define TX_FRAME        320         /* 20 ms @ 16 kHz — sent as-is, no upsampling */
+/* 0x02 = raw Int16 PCM captured at 16 kHz.  A distinct tag (not 0x00, which
+ * means 48 kHz) so the server knows to resample; the browser's own uplink is
+ * untouched. */
+#define AUDIO_TAG_PCM_16K  0x02
 #define TX_MAX_HOLD_MS  180000
 #define TX_HB_MS        1500
 
@@ -55,12 +59,17 @@ static void note(const char *fmt, ...)
 static void tx_task(void *arg)
 {
     (void)arg;
-    /* One buffer: byte 0 is the codec tag, samples 1..960 the 48 kHz stream.
-     * The 320 captured samples are expanded from the back. */
+    /* One buffer: byte 0 is the codec tag, the rest is 20 ms of 16 kHz PCM.
+     *
+     * The tag used to be 0x01 (Opus) while the payload was already raw PCM —
+     * the server tried to Opus-decode uncompressed samples.  With libopus gone
+     * from this build the payload is native 16 kHz PCM tagged 0x00, and the
+     * 3x upsampling to 48 kHz is unnecessary: the server resamples.
+     */
     static int16_t buf[1 + TX_FRAME];
     uint8_t *tag = (uint8_t *)buf;
     int16_t *pcm = buf + 1;
-    *tag = 0x01;
+    *tag = AUDIO_TAG_PCM_16K;
 
     int64_t last_hb = 0;
     const int64_t started = esp_timer_get_time();
@@ -93,11 +102,8 @@ static void tx_task(void *arg)
         s_peak_avg_sum += (int)(sum / TX_MIC_FRAME);
         s_peak_avg_n++;
 
-        /* 16 -> 48 kHz zero-order hold, expanded from the back. */
-        for (int i = TX_MIC_FRAME - 1; i >= 0; i--) {
-            const int16_t v = pcm[i];
-            pcm[i * 3] = pcm[i * 3 + 1] = pcm[i * 3 + 2] = v;
-        }
+        /* No rate conversion: the captured 16 kHz samples go out unchanged. */
+        (void)0;
 
         if (mrrc_net_send_bin(buf, 1 + TX_FRAME * sizeof(int16_t))) {
             s_tx_frames++;

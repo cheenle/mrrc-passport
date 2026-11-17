@@ -223,6 +223,17 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         esp_websocket_client_send_text(s_ws, "{\"type\":\"spectrumCaps\",\"profile\":\"mid\"}",
                                        (int)strlen("{\"type\":\"spectrumCaps\",\"profile\":\"mid\"}"),
                                        pdMS_TO_TICKS(500));
+        /* Declare the PCM16 audio profile (server side: AD-038).
+         *
+         * This build links no decoder, so the legacy 0x01 Opus downlink would
+         * be dropped on arrival, and the legacy 0x00 tag means *48 kHz* PCM —
+         * playing that on a 16 kHz codec runs at 3x speed.  Profile "pcm16"
+         * puts both directions on tag 0x02 at 16 kHz, which the server
+         * resamples.  The field is "profile", and the server answers with its
+         * accepted/rejected frame. */
+        esp_websocket_client_send_text(s_ws, "{\"type\":\"audioCaps\",\"profile\":\"pcm16\"}",
+                                       (int)strlen("{\"type\":\"audioCaps\",\"profile\":\"pcm16\"}"),
+                                       pdMS_TO_TICKS(500));
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "/WSterminal disconnected");
