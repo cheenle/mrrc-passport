@@ -83,18 +83,18 @@
 #define Y_SCALE     240
 #define Y_CHIPS     296
 #define H_CHIPS     22
-#define Y_TOAST     298   /* overlays the chips bar; no plate, so it is just text */
+#define Y_TOAST     272   /* its own line above the scale row */
 
 #define BINS        850
 
-static lv_obj_t *s_bar_top, *s_mode, *s_vfo, *s_batt, *s_wifi;
+static lv_obj_t *s_bar_top, *s_mode, *s_vfo, *s_batt;
+static lv_obj_t *s_bar[4];   /* RSSI meter: four rising bars */
 static lv_obj_t *s_freq;
 static lv_obj_t *s_sunit, *s_sbar, *s_fil, *s_af;
 static lv_obj_t *s_bandplate, *s_spanplate;
 static lv_obj_t *s_spec_line, *s_wf_img;
 static lv_obj_t *s_sc_l, *s_sc_c, *s_sc_r;
 static lv_obj_t *s_chip_mode, *s_chip_tx, *s_chip_link;
-static lv_obj_t *s_toast;
 
 /* Fixed floor/ceiling, same as the browser defaults (Floor 71 / Ceil 233).
  * Adaptive AGC made the trace jump whenever a single carrier appeared. */
@@ -237,28 +237,26 @@ static lv_obj_t *plain(const lv_font_t *font, lv_color_t color, int x, int y)
 /* Link strength as a dBm number.  The handheld draws four 2 px bars, which at
  * this font size is unreadable on our panel; the figure itself is unambiguous
  * and colour-codes the same three bands. */
-static void draw_rssi(lv_obj_t *o, int rssi, bool up)
+/* Signal strength as four vertical bars of rising height, in plain white —
+ * the familiar phone/desktop Wi-Fi meter.  Replaces the coloured block glyphs:
+ * green/orange/red made a status icon look like an alarm, and block glyphs are
+ * not aligned on a common baseline so they never read as a meter.
+ *
+ * Drawn as real rectangles rather than font glyphs so the bars share a baseline
+ * and their widths stay equal at any font scale. */
+static void draw_rssi(int rssi, bool up)
 {
-    /* Four blocks.  The bare dBm figure made the operator decode a
-     * radio-engineering number at a glance; bar height says it instantly and
-     * the colour carries good / fair / poor. */
-    /* Ascending blocks, not equal ones: four identical squares read as an
-     * unrelated UI widget, a rising staircase reads as signal strength. */
-    static const char *const BAR[5] = {
-        "", "\xe2\x96\x81", "\xe2\x96\x82\xe2\x96\x84",
-        "\xe2\x96\x82\xe2\x96\x84\xe2\x96\x86",
-        "\xe2\x96\x81\xe2\x96\x83\xe2\x96\x85\xe2\x96\x87" };
-    if (!up || rssi == 0) {
-        lv_label_set_text(o, "--");
-        lv_obj_set_style_text_color(o, lv_color_hex(C_FAINT), 0);
-        return;
-    }
-    int n = rssi > -55 ? 4 : (rssi > -65 ? 3 : (rssi > -75 ? 2 : 1));
-    lv_label_set_text(o, BAR[n]);
-    lv_obj_set_style_text_color(o,
-        lv_color_hex(n >= 3 ? C_GREEN : (n == 2 ? C_ORANGE : C_RED)), 0);
-}
+    static const int H[4] = { 4, 7, 10, 13 };
+    const int level = (!up || rssi == 0) ? 0
+                    : (rssi > -55 ? 4 : (rssi > -65 ? 3 : (rssi > -75 ? 2 : 1)));
 
+    for (int i = 0; i < 4; i++) {
+        /* Lit bars are white; unlit ones stay the field grey so the meter's full
+         * extent is still readable as a scale. */
+        lv_obj_set_style_bg_color(s_bar[i],
+            i < level ? lv_color_hex(C_TEXT) : lv_color_hex(C_FIELD), 0);
+    }
+}
 /* Battery percentage — pushed out of refresh()'s hot path so it can share the
  * RSSI throttle. */
 static void update_battery(void)
@@ -289,9 +287,21 @@ static void build_screen(void)
     s_batt = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 44, 8);
     lv_obj_set_style_text_align(s_batt, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_size(s_batt, 40, 16);
-    s_wifi = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 84, 8);
-    lv_obj_set_style_text_align(s_wifi, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_size(s_wifi, 34, 16);
+    /* Four bars, 3 px wide with 2 px gaps, bottoms aligned at a common
+     * baseline — a real meter rather than coloured font glyphs. */
+    for (int i = 0; i < 4; i++) {
+        s_bar[i] = lv_obj_create(lv_screen_active());
+        /* Height grows left to right, bottoms on a shared baseline at y=20:
+         * y = baseline - height, so all four line up along the bottom edge. */
+        const int h = 4 + i * 3;
+        lv_obj_set_size(s_bar[i], 3, h);
+        lv_obj_set_pos(s_bar[i], SCR_W - 82 + i * 5, 20 - h);
+        lv_obj_set_style_radius(s_bar[i], 1, 0);
+        lv_obj_set_style_border_width(s_bar[i], 0, 0);
+        lv_obj_set_style_bg_opa(s_bar[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(s_bar[i], lv_color_hex(C_FIELD), 0);
+        lv_obj_remove_flag(s_bar[i], LV_OBJ_FLAG_SCROLLABLE);
+    }
     s_vfo  = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 172, 8);
     lv_obj_set_style_text_align(s_vfo, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_width(s_vfo, 70);
@@ -372,23 +382,22 @@ static void build_screen(void)
 
     /* ── bottom chips: mode | RX/TX | link ── */
     bar(Y_CHIPS, H_CHIPS);
-    s_chip_mode = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 6, Y_CHIPS + 2);
+    /* Three fixed, non-overlapping slots: knob mode left, RX/TX centred,
+     * link state right.  Mixing an absolute x with LV_ALIGN_TOP_MID made the
+     * mode text and the RX/TX text fight over the same place. */
+    s_chip_mode = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 8, Y_CHIPS + 2);
+    lv_obj_set_width(s_chip_mode, 44);
     lv_label_set_text(s_chip_mode, "FREQ");
-    s_chip_tx = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 0, Y_CHIPS + 2);
-    lv_obj_align(s_chip_tx, LV_ALIGN_TOP_MID, 0, Y_CHIPS + 2);
-    lv_label_set_text(s_chip_tx, "RX");
-    s_chip_link = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 46, Y_CHIPS + 2);
-    lv_label_set_text(s_chip_link, "LINK");
 
-    /* No background plate: a red block for every mode announcement was louder
-     * than the message.  The toast is plain text; red is reserved for the TX
-     * indication, which is the one place colour carries a warning. */
-    s_toast = plain(&lv_font_montserrat_14, lv_color_hex(C_ACCENT), 0, Y_TOAST);
-    lv_obj_align(s_toast, LV_ALIGN_TOP_MID, 0, Y_TOAST);
-    lv_obj_set_style_bg_opa(s_toast, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(s_toast, 0, 0);
-    lv_label_set_text(s_toast, "");
-    lv_obj_add_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
+    s_chip_tx = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 96, Y_CHIPS + 2);
+    lv_obj_set_width(s_chip_tx, 48);
+    lv_obj_set_style_text_align(s_chip_tx, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_chip_tx, "RX");
+
+    s_chip_link = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 52, Y_CHIPS + 2);
+    lv_obj_set_width(s_chip_link, 52);
+    lv_obj_set_style_text_align(s_chip_link, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_text(s_chip_link, "LINK");
 
     heat_init();
     memset(s_wf_buf, 0, sizeof s_wf_buf);
@@ -447,6 +456,16 @@ static void refresh(void)
     const bool tx = st.tx_status > 0;
     char b[24];
 
+    /* The knob mode is ours, not the radio's: set it outside the main_changed
+     * branch so it can never lag behind the keys by a server frame. */
+    {
+        const char *m = s_ui_mode == UI_MODE_VOL ? "VOL"
+                      : (s_ui_mode == UI_MODE_CHANNEL ? "CH" : "FREQ");
+        if (strcmp(m, lv_label_get_text(s_chip_mode)) != 0) {
+            lv_label_set_text(s_chip_mode, m);
+        }
+    }
+
     if (main_changed) {
         format_freq(b, sizeof b, st.freq_hz);
         lv_label_set_text(s_freq, b);
@@ -473,14 +492,11 @@ static void refresh(void)
 
         /* RSSI and battery do not move at 5 Hz — refresh them about every 2 s. */
         if ((lv_tick_get() / 200) % 10 == 0) {
-            draw_rssi(s_wifi, mrrc_net_rssi(), mrrc_net_up());
+            draw_rssi(mrrc_net_rssi(), mrrc_net_up());
             update_battery();
         }
 
         /* chips bar: knob mode | RX or TX seconds | link */
-        const char *m = s_ui_mode == UI_MODE_VOL ? "VOL"
-                      : (s_ui_mode == UI_MODE_CHANNEL ? "CH" : "FREQ");
-        lv_label_set_text(s_chip_mode, m);
         if (tx) {
             snprintf(b, sizeof b, "TX%s", st.tx_status == 2 ? "T" : "");
             lv_label_set_text(s_chip_tx, b);
@@ -602,14 +618,10 @@ void mrrc_ui_set_battery(int percent, bool charging)
     s_batt_charging = charging;
 }
 
+/* Kept for callers, but the mode readout now lives solely in the chips bar:
+ * showing it twice (orange text plus the bar) meant the two could disagree for
+ * a frame after a mode change, which read as a glitch. */
 void mrrc_ui_set_toast(const char *text)
 {
-    if (!bsp_lvgl_lock(100)) return;
-    lv_label_set_text(s_toast, text ? text : "");
-    /* An empty label with a filled background still paints a small solid
-     * square at the bottom of the screen — hide it until there is something to
-     * say. */
-    if (text && text[0]) lv_obj_clear_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
-    bsp_lvgl_unlock();
+    (void)text;
 }

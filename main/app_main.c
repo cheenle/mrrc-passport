@@ -125,6 +125,23 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user)
     if (s_key_q) (void)xQueueSend(s_key_q, &e, 0);
 }
 
+/* Key the radio and open the uplink.  Returns false if the radio refused, in
+ * which case everything is already unwound. */
+static bool start_tx(void)
+{
+    mrrc_audio_suspend();
+    /* One socket: nothing to open, and no ownership ordering to obey. */
+    mrrc_net_set_ptt(true);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    if (!mrrc_tx_key(true)) {
+        ESP_LOGE(TAG, "TX start failed");
+        mrrc_net_set_ptt(false);
+        mrrc_audio_resume();
+        return false;
+    }
+    return true;
+}
+
 static void keys_task(void *arg)
 {
     (void)arg;
@@ -145,6 +162,18 @@ static void keys_task(void *arg)
      * tap falls into that hole and no CLICK ever arrives.  Measure the press
      * ourselves from PRESS/RELEASE instead. */
     int64_t ok_press_us = 0;
+    /* A press must be held this long before it means "transmit".  Comfortably
+     * longer than any tap (measured taps: 170-220 ms, worst seen 350 ms) and
+     * short enough that push-to-talk still feels immediate. */
+    /* 400 ms: above every measured tap (<=221 ms), below every measured
+     * push-to-talk (>=569 ms), so it has 180 ms of margin on either side. */
+    /* How long the key must have been untouched before a long press counts as
+     * push-to-talk rather than the tail of a double tap.  Comfortably longer
+     * than the 450 ms double-tap window, short enough that the operator does
+     * not notice. */
+    const int64_t PTT_IDLE_US = 900000;
+    int64_t last_release_us = 0;       /* when any OK press was released */
+
     /* Double/triple tap arbitration.
      *
      * The old scheme waited out the full 600 ms window before acting on a
@@ -182,37 +211,45 @@ static void keys_task(void *arg)
             continue;
         }
 
-        /* ── PTT ─────────────────────────────────────────────────────── */
-        if (e.ev == BSP_BTN_LONG && e.btn == BSP_BTN_OK && !ptt_on) {
-            /* A second tap of a double tap lasts well over the 350 ms long-press
-             * threshold, so it used to key the radio mid-sequence.  If the
-             * previous tap was recent this press belongs to a tap sequence, not
-             * to PTT: drop it here and let the release path count it. */
-            if (tap_deadline && esp_timer_get_time() < tap_deadline) {
-                /* Not a transmission: the release path counts this as a tap,
-                 * because ptt_on is still false. */
+        if (e.btn == BSP_BTN_OK) {
+            ESP_LOGI(TAG, "OK ev=%d held=%lldus window=%lldus taps=%d",
+                     (int)e.ev, ok_press_us ? (long long)(esp_timer_get_time() - ok_press_us) : -1LL,
+                     tap_deadline ? (long long)(tap_deadline - esp_timer_get_time()) : 0LL,
+                     tap_count);
+        }
+
+        /* ── PTT ───────────────────────────────────────────────────────
+         * Measured on this board (hardware log): deliberate taps release after
+         * 169-221 ms, real push-to-talk after 569-580 ms, and nothing lands in
+         * between.  BSP_BTN_LONG fires at 350 ms into *any* press, which sits in
+         * exactly that empty gap, so it cannot tell the two intents apart: a
+         * fast double tap whose first press was reported late produces a LONG
+         * and keyed the radio.  The event is therefore ignored and PTT is keyed
+         * from our own timer, at a point with margin on both sides.
+         */
+        if (e.btn == BSP_BTN_OK && e.ev == BSP_BTN_LONG) {
+            /* Only a press that starts from a quiet key can transmit.
+             *
+             * Measured on this board: taps release after 169-246 ms, a real
+             * push-to-talk after 569-580 ms, and a *fast double tap* is
+             * collapsed by the ADC driver into a single press that is reported
+             * as a long press releasing at 619-627 ms.  That last case is the
+             * dangerous one — it is indistinguishable from PTT by duration
+             * alone, and it is what kept keying the radio on quick double taps.
+             *
+             * The discriminator that does work: a merged double tap is always
+             * preceded by a recent tap release, a genuine PTT is not.  So the
+             * key must have been idle for PTT_IDLE_US before the press.  This
+             * costs no latency on a real transmission. */
+            if (last_release_us && esp_timer_get_time() - last_release_us < PTT_IDLE_US) {
                 continue;
             }
-            ptt_on = true;
-            /* Single /WSterminal socket: the uplink is permanently connected,
-             * so the old "open /WSaudioTX before ptt:true" ordering (needed for
-             * the server's per-socket TX-owner claim) no longer applies.  Key
-             * the radio first, give it time to open its audio path, then
-             * stream. */
-            mrrc_audio_suspend();
-            /* One socket: nothing to open, and no ownership ordering to obey. */
-            mrrc_net_set_ptt(true);
-            vTaskDelay(pdMS_TO_TICKS(200));
-            if (!mrrc_tx_key(true)) {
-                ESP_LOGE(TAG, "TX start failed");
-                mrrc_net_set_ptt(false);
-                mrrc_audio_resume();
-                ptt_on = false;
-            }
+            ptt_on = start_tx();
             continue;
         }
         if (e.ev == BSP_BTN_RELEASE && e.btn == BSP_BTN_OK && ptt_on) {
             ptt_on = false;
+            last_release_us = esp_timer_get_time();
             mrrc_tx_key(false);
             mrrc_net_set_ptt(false);
             mrrc_audio_resume();
@@ -245,6 +282,7 @@ static void keys_task(void *arg)
         }
         if (e.btn == BSP_BTN_OK && e.ev == BSP_BTN_RELEASE && !ptt_on) {
             const int64_t now = esp_timer_get_time();
+            last_release_us = now;
             const int64_t held = ok_press_us ? now - ok_press_us : 0;
             ok_press_us = 0;
             if (held > 0 && held < 500000) {          /* a tap, not a keying */
