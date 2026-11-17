@@ -451,6 +451,7 @@ static void refresh(void)
 {
     /* May write to the socket, so it runs before any LVGL work. */
     mrrc_net_chan_pump();
+    mrrc_net_audio_pump();
 
     mrrc_state_t st;
     mrrc_state_lock();

@@ -58,6 +58,18 @@ static char s_token[TOKEN_MAX];
 static char s_auth_hdr[TOKEN_MAX + 32];
 static esp_websocket_client_handle_t s_ws;
 static volatile bool s_ctrl_up;
+
+/* Audio wire format actually in force.
+ *
+ * 16 kHz PCM16 is preferred: it is the native rate of this codec and of the
+ * format the server calls "pcm16".  If the server does not confirm it — an
+ * older box that never heard of the profile, or an explicit rejection — the
+ * link falls back to the legacy 48 kHz raw PCM tag, which any server version
+ * understands.  48 kHz costs bandwidth and needs downsampling here, so it is
+ * strictly the fallback. */
+typedef enum { AUD_RATE_UNKNOWN = 0, AUD_RATE_16K, AUD_RATE_48K } aud_rate_t;
+static volatile aud_rate_t s_aud_rate = AUD_RATE_UNKNOWN;
+static int64_t s_aud_ask_us;          /* when the profile was requested */
 static char s_acc[WS_FRAME_MAX];
 static size_t s_acc_len;
 
@@ -154,6 +166,26 @@ static void handle_ctrl_text(const char *payload, int len)
     const char *t = cJSON_IsString(type) ? type->valuestring : "";
     int bump = 0;
 
+    /* The server's answer to our audioCaps request.  This must be read before
+     * anything takes the state lock, and it settles the wire format for the
+     * life of the connection. */
+    if (!strcmp(t, "audioCaps")) {
+        const cJSON *acc = cJSON_GetObjectItem(root, "accepted");
+        if (cJSON_IsTrue(acc)) {
+            const cJSON *rate = cJSON_GetObjectItem(root, "rate");
+            s_aud_rate = AUD_RATE_16K;
+            ESP_LOGI(TAG, "audio profile pcm16 accepted (%d Hz)",
+                     cJSON_IsNumber(rate) ? (int)rate->valuedouble : 16000);
+        } else {
+            const cJSON *why = cJSON_GetObjectItem(root, "reason");
+            ESP_LOGW(TAG, "pcm16 rejected (%s), falling back to 48k PCM",
+                     cJSON_IsString(why) ? why->valuestring : "no reason given");
+            s_aud_rate = AUD_RATE_48K;
+        }
+        cJSON_Delete(root);
+        return;
+    }
+
     mrrc_state_lock();
     if (!strcmp(t, "fullState")) {
         apply_object(cJSON_GetObjectItem(root, "data"), &bump);
@@ -234,10 +266,18 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         esp_websocket_client_send_text(s_ws, "{\"type\":\"audioCaps\",\"profile\":\"pcm16\"}",
                                        (int)strlen("{\"type\":\"audioCaps\",\"profile\":\"pcm16\"}"),
                                        pdMS_TO_TICKS(500));
+        /* Ask, then wait to be told.  Until the server confirms, the uplink tag
+         * stays 16 kHz too — a server that ignores the request never decodes
+         * that tag either, so the failure is symmetric and visible rather than
+         * half-working.  s_aud_ask_us drives the timeout in mrrc_net_audio_pump. */
+        s_aud_rate = AUD_RATE_UNKNOWN;
+        s_aud_ask_us = esp_timer_get_time();
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "/WSterminal disconnected");
         s_ctrl_up = false;
+        s_aud_rate = AUD_RATE_UNKNOWN;
+        s_aud_ask_us = 0;
         break;
     case WEBSOCKET_EVENT_DATA: {
         /* Only text frames carry control JSON.  A frame larger than the socket
@@ -247,14 +287,22 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         /* Binary frames on this socket are downlink audio. */
         if (ev->op_code == 0x02) {
             if (!ev->data_ptr || ev->data_len <= 0) break;
-            /* Two kinds of binary share this socket: 852-byte spectrum frames
-             * ([0x02][0x01] + 850 bins) and ~130-byte audio frames
-             * ([0x00][0x01] + Opus). */
-            if (ev->data_len >= 852) {
+            /* Two kinds of binary share this socket, distinguished by the
+             * channel byte the server puts in front of each frame:
+             *   [0x00] rx audio, [0x02] spectrum (server: TERMINAL_CHAN_*).
+             * Length was used to tell them apart, which worked only while audio
+             * frames were ~130 B of Opus; 20 ms of 16 kHz PCM is 640 B and a
+             * coalesced send can exceed the 852-byte scope frame, so a real
+             * audio packet would have been handed to the spectrum parser. */
+            const uint8_t chan = ((const uint8_t *)ev->data_ptr)[0];
+            if (chan == 0x02) {
                 mrrc_ui_spectrum((const uint8_t *)ev->data_ptr + 2,
                                  (size_t)ev->data_len - 2);
-            } else {
-                mrrc_audio_feed((const uint8_t *)ev->data_ptr, (size_t)ev->data_len);
+            } else if (chan == 0x00) {
+                /* Skip the channel byte: mrrc_audio_feed works from the codec
+                 * tag onward. */
+                mrrc_audio_feed((const uint8_t *)ev->data_ptr + 1,
+                                (size_t)ev->data_len - 1);
             }
             break;
         }
@@ -301,6 +349,25 @@ void mrrc_net_set_ptt(bool on)
              on ? "true" : "false");
     ws_send_text(msg);
     ESP_LOGI(TAG, "PTT %s", on ? "ON" : "OFF");
+}
+
+/* Settle the wire format.  Called from the UI tick (5 Hz), which is far more
+ * often than needed but costs two comparisons.  A server that never answers
+ * would otherwise leave the terminal in AUD_RATE_UNKNOWN for ever — 16 kHz
+ * frames out, nothing usable in — so silence is treated as "no", after a grace
+ * period long enough for a slow but healthy link to reply. */
+void mrrc_net_audio_pump(void)
+{
+    if (s_aud_rate != AUD_RATE_UNKNOWN || !s_aud_ask_us) return;
+    if (esp_timer_get_time() - s_aud_ask_us < 3000000LL) return;   /* 3 s */
+    ESP_LOGW(TAG, "no audioCaps reply in 3 s, falling back to 48k PCM");
+    s_aud_rate = AUD_RATE_48K;
+}
+
+/* True while the link is carrying 16 kHz PCM16 (the preferred format). */
+bool mrrc_net_audio_16k(void)
+{
+    return s_aud_rate != AUD_RATE_48K;   /* unconfirmed papers over as 16k */
 }
 
 void mrrc_net_set_chan(int index)

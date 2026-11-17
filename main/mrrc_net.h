@@ -66,6 +66,11 @@ void mrrc_net_set_chan(int index);
 /* Re-asserts the pending channel frequency once a mode transition has settled;
  * call periodically (the UI task's 5 Hz tick is a good place). */
 void mrrc_net_chan_pump(void);
+/* Settles the audio wire format after the pcm16 request; call from a periodic
+ * tick.  A server that never answers is treated as a refusal. */
+void mrrc_net_audio_pump(void);
+/* True while the uplink/downlink carries 16 kHz PCM16 rather than 48 kHz. */
+bool mrrc_net_audio_16k(void);
 /* Cycle to the next working mode (LSB -> USB -> CW-U -> ...). */
 void mrrc_net_next_mode(void);
 

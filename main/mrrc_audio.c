@@ -117,10 +117,23 @@ static void audio_task(void *arg)
          * our own uplink back through the speaker is a howl, not audio. */
         if (s_muted || mrrc_tx_active()) continue;
 
-        const size_t samples = (n / sizeof(int16_t));
+        const int16_t *in = (const int16_t *)frame;
+        size_t samples = n / sizeof(int16_t);
         if (samples == 0) continue;
-        /* The ring buffer hands back whole bytes; a stray odd byte would
-         * misalign every following sample, so drop it. */
+
+        if (!mrrc_net_audio_16k()) {
+            /* 48 kHz fallback: decimate 3:1 in place.  A 3-tap average is both
+             * the decimation filter and a cheap anti-alias, which is all a 3 kHz
+             * SSB passband needs.  The write index always trails the read index,
+             * so no second buffer is required. */
+            size_t out = 0;
+            int16_t *w = (int16_t *)frame;          /* safe: out <= i */
+            for (size_t i = 0; i + 2 < samples; i += 3) {
+                w[out++] = (int16_t)((in[i] + in[i + 1] + in[i + 2]) / 3);
+            }
+            samples = out;
+            if (samples == 0) continue;
+        }
         if (bsp_audio_write((const int16_t *)frame, samples * sizeof(int16_t)) != ESP_OK)
             s_errors++;
     }
@@ -146,13 +159,16 @@ void mrrc_audio_feed(const uint8_t *data, size_t len)
      *
      * Layer one is the transport marker, layer two the codec tag.  Only PCM is
      * accepted now; an Opus frame is dropped because there is no decoder. */
-    if (data[0] == 0x00 && (data[1] == 0x00 || data[1] == 0x01)) {
-        /* transport marker + codec byte.  0x00 = PCM (the only format this
-         * build can play); 0x01 = Opus, which is no longer linked in. */
-        if (data[1] == 0x00) rb_put(data + 2, len - 2);
-        return;
+    /* [channel][codec tag][payload].  The channel byte (0x00 = rx audio) is
+     * stripped by the caller in mrrc_net.c, so what arrives here starts at the
+     * codec tag.  Accepted tags:
+     *   0x02  16 kHz Int16 PCM  — the negotiated format
+     *   0x00  48 kHz Int16 PCM  — the fallback when the server has no pcm16
+     *   0x01  Opus              — not linked in; dropped on the floor
+     */
+    if (data[0] == 0x02 || data[0] == 0x00) {
+        rb_put(data + 1, len - 1);
     }
-    if (data[0] == 0x00) rb_put(data + 1, len - 1);
 }
 
 void mrrc_audio_suspend(void)

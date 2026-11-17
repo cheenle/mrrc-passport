@@ -23,12 +23,13 @@
 static const char *TAG = "tx";
 
 #define TX_TASK_STACK   4096
-#define TX_MIC_FRAME    320         /* 20 ms @ 16 kHz captured by the codec */
-#define TX_FRAME        320         /* 20 ms @ 16 kHz — sent as-is, no upsampling */
+#define TX_FRAME_16K    320         /* 20 ms @ 16 kHz, sent as-is */
+#define TX_FRAME_48K    960         /* 20 ms @ 48 kHz after the fallback expansion */
 /* 0x02 = raw Int16 PCM captured at 16 kHz.  A distinct tag (not 0x00, which
  * means 48 kHz) so the server knows to resample; the browser's own uplink is
  * untouched. */
-#define AUDIO_TAG_PCM_16K  0x02
+#define AUDIO_TAG_PCM_16K  0x02        /* raw Int16 at 16 kHz (server: pcm16) */
+#define AUDIO_TAG_PCM_48K  0x00        /* legacy raw Int16 at 48 kHz */
 #define TX_MAX_HOLD_MS  180000
 #define TX_HB_MS        1500
 
@@ -59,17 +60,17 @@ static void note(const char *fmt, ...)
 static void tx_task(void *arg)
 {
     (void)arg;
-    /* One buffer: byte 0 is the codec tag, the rest is 20 ms of 16 kHz PCM.
+    /* One buffer: byte 0 is the codec tag, the rest is 20 ms of PCM.
      *
      * The tag used to be 0x01 (Opus) while the payload was already raw PCM —
-     * the server tried to Opus-decode uncompressed samples.  With libopus gone
-     * from this build the payload is native 16 kHz PCM tagged 0x00, and the
-     * 3x upsampling to 48 kHz is unnecessary: the server resamples.
+     * the server tried to Opus-decode uncompressed samples.  The format is now
+     * negotiated (see mrrc_net_audio_16k): 16 kHz tag 0x02 when the server
+     * confirms the pcm16 profile, otherwise the legacy 48 kHz tag 0x00, which
+     * needs the 3x zero-order hold to reach 48 kHz.
      */
-    static int16_t buf[1 + TX_FRAME];
+    static int16_t buf[1 + TX_FRAME_48K];
     uint8_t *tag = (uint8_t *)buf;
     int16_t *pcm = buf + 1;
-    *tag = AUDIO_TAG_PCM_16K;
 
     int64_t last_hb = 0;
     const int64_t started = esp_timer_get_time();
@@ -85,7 +86,7 @@ static void tx_task(void *arg)
             break;
         }
 
-        if (bsp_audio_read(pcm, TX_MIC_FRAME * sizeof(int16_t)) != ESP_OK) {
+        if (bsp_audio_read(pcm, TX_FRAME_16K * sizeof(int16_t)) != ESP_OK) {
             s_read_fail++;
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
@@ -93,19 +94,32 @@ static void tx_task(void *arg)
 
         int pk = 0;
         long sum = 0;
-        for (int i = 0; i < TX_MIC_FRAME; i++) {
+        for (int i = 0; i < TX_FRAME_16K; i++) {
             const int a = pcm[i] < 0 ? -pcm[i] : pcm[i];
             if (a > pk) pk = a;
             sum += a;
         }
         if (pk > s_peak_max) s_peak_max = pk;
-        s_peak_avg_sum += (int)(sum / TX_MIC_FRAME);
+        s_peak_avg_sum += (int)(sum / TX_FRAME_16K);
         s_peak_avg_n++;
 
-        /* No rate conversion: the captured 16 kHz samples go out unchanged. */
-        (void)0;
+        size_t bytes;
+        if (mrrc_net_audio_16k()) {
+            /* Native 16 kHz: no conversion, the server upsamples. */
+            *tag = AUDIO_TAG_PCM_16K;
+            bytes = 1 + TX_FRAME_16K * sizeof(int16_t);
+        } else {
+            /* Legacy 48 kHz PCM: 3x zero-order hold, expanded from the back so
+             * the source samples are not overwritten before they are read. */
+            *tag = AUDIO_TAG_PCM_48K;
+            for (int i = TX_FRAME_16K - 1; i >= 0; i--) {
+                const int16_t v = pcm[i];
+                pcm[i * 3] = pcm[i * 3 + 1] = pcm[i * 3 + 2] = v;
+            }
+            bytes = 1 + TX_FRAME_48K * sizeof(int16_t);
+        }
 
-        if (mrrc_net_send_bin(buf, 1 + TX_FRAME * sizeof(int16_t))) {
+        if (mrrc_net_send_bin(buf, bytes)) {
             s_tx_frames++;
         } else {
             s_send_fail++;
