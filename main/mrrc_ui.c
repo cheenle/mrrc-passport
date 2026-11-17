@@ -489,7 +489,9 @@ static void refresh(void)
 
         /* filter + AF live in the info row; SPK replaces AF in VOL mode */
         if (st.filter_hz > 0) {
-            snprintf(b, sizeof b, "%d.%dK", st.filter_hz / 1000,
+            /* "FL" not "FIL": the full word pushes the plate past its 62 px and
+             * the row wraps onto the S-meter, but a bare value is cryptic. */
+            snprintf(b, sizeof b, "FL %d.%dK", st.filter_hz / 1000,
                      (st.filter_hz % 1000) / 100);
             lv_label_set_text(s_fil, b);
         } else {
