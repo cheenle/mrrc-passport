@@ -34,6 +34,7 @@ typedef struct {
     int     s_meter;        /* 0..255 */
     char    s_unit[MRRC_S_UNIT_LEN];
     int     af_gain;
+    int     scope_span;         /* SS05 index into k_spans_hz; 6 = 100 kHz */
     int     filter_hz;
     int     tx_status;      /* 0 = RX, 1 = TX, 2 = TUNE */
     bool    radio_online;

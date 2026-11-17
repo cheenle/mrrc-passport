@@ -26,6 +26,7 @@
 //
 // The refresh runs as an LVGL timer, not a separate task: LVGL is not thread
 // safe and the WebSocket callback must never block on a render.
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -69,11 +70,12 @@
 #define SCR_H       320
 #define H_HDR       26          /* chrome bar height; its text sits inside it */
 #define Y_FREQ      46          /* below the accent rule, clear of the bar */
-#define Y_INFO      96
+#define Y_INFO      88          /* row 1: band | FIL | AF | SPAN */
 #define H_INFO      17
-#define Y_LBL       116                 /* scope caption + toast anchor */
-#define Y_PLOT      130
-#define PLOT_H      72
+#define Y_SMET      107         /* row 2: the S-meter, on its own line */
+#define H_SMET      18
+#define Y_PLOT      128         /* caption row reclaimed for the plot */
+#define PLOT_H      66
 #define Y_WF        202
 #define WF_H        30                  /* RGB565: 240*30*2 = 14.4 KB */
 #define Y_SCALE     236
@@ -86,7 +88,7 @@
 static lv_obj_t *s_bar_top, *s_mode, *s_vfo, *s_batt, *s_wifi;
 static lv_obj_t *s_freq;
 static lv_obj_t *s_sunit, *s_sbar, *s_fil, *s_af;
-static lv_obj_t *s_scope_lbl, *s_span;
+static lv_obj_t *s_bandplate, *s_spanplate;
 static lv_obj_t *s_spec_line, *s_wf_img;
 static lv_obj_t *s_sc_l, *s_sc_c, *s_sc_r;
 static lv_obj_t *s_chip_mode, *s_chip_tx, *s_chip_link;
@@ -153,9 +155,24 @@ static ui_mode_t s_ui_mode = UI_MODE_FREQ;
 static int s_spk_pct = 60;
 static char s_chan_lbl[24];
 
-/* The span column shows the scope window; the handheld reads it from
- * st.scope_span, which this build does not receive, so it is a fixed default. */
-static const int32_t k_span_hz = 100000;
+/* SS05 index -> Hz, same table as the handheld.  The old code hardcoded 100 kHz
+ * and never read scope_span, so the caption and the three axis labels stayed at
+ * ±50 kHz no matter what the radio was showing. */
+static const int32_t k_spans_hz[10] = {
+    1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000
+};
+
+static int32_t span_hz(int idx)
+{
+    if (idx < 0 || idx > 9) idx = 6;      /* fall back to 100 kHz */
+    return k_spans_hz[idx];
+}
+
+static void format_span(char *out, size_t n, int32_t hz)
+{
+    if (hz >= 1000000) snprintf(out, n, "%" PRId32 "M", hz / 1000000);
+    else snprintf(out, n, "%" PRId32 "K", hz / 1000);
+}
 
 /* 7.079.51 — last two digits are Hz/10, matching the handheld. */
 static void format_freq(char *out, size_t n, int32_t hz)
@@ -220,18 +237,36 @@ static lv_obj_t *plain(const lv_font_t *font, lv_color_t color, int x, int y)
  * and colour-codes the same three bands. */
 static void draw_rssi(lv_obj_t *o, int rssi, bool up)
 {
-    char b[16];
+    /* Four blocks.  The bare dBm figure made the operator decode a
+     * radio-engineering number at a glance; bar height says it instantly and
+     * the colour carries good / fair / poor. */
+    /* Ascending blocks, not equal ones: four identical squares read as an
+     * unrelated UI widget, a rising staircase reads as signal strength. */
+    static const char *const BAR[5] = {
+        "", "\xe2\x96\x81", "\xe2\x96\x82\xe2\x96\x84",
+        "\xe2\x96\x82\xe2\x96\x84\xe2\x96\x86",
+        "\xe2\x96\x81\xe2\x96\x83\xe2\x96\x85\xe2\x96\x87" };
     if (!up || rssi == 0) {
         lv_label_set_text(o, "--");
         lv_obj_set_style_text_color(o, lv_color_hex(C_FAINT), 0);
         return;
     }
-    snprintf(b, sizeof b, "%d", rssi);
-    lv_label_set_text(o, b);
-    lv_color_t c = rssi > -55 ? lv_color_hex(C_GREEN)
-               : rssi > -70   ? lv_color_hex(C_ORANGE)
-                              : lv_color_hex(C_RED);
-    lv_obj_set_style_text_color(o, c, 0);
+    int n = rssi > -55 ? 4 : (rssi > -65 ? 3 : (rssi > -75 ? 2 : 1));
+    lv_label_set_text(o, BAR[n]);
+    lv_obj_set_style_text_color(o,
+        lv_color_hex(n >= 3 ? C_GREEN : (n == 2 ? C_ORANGE : C_RED)), 0);
+}
+
+/* Battery percentage — pushed out of refresh()'s hot path so it can share the
+ * RSSI throttle. */
+static void update_battery(void)
+{
+    if (s_batt_pct < 0 || !s_batt) return;
+    char b[12];
+    snprintf(b, sizeof b, "%d%%", s_batt_pct);
+    lv_label_set_text(s_batt, b);
+    lv_obj_set_style_text_color(s_batt,
+        lv_color_hex(s_batt_charging ? C_GREEN : C_TEXT), 0);
 }
 
 static void build_screen(void)
@@ -247,9 +282,15 @@ static void build_screen(void)
      * the chrome row is centred inside a 26 px bar instead of hugging the top. */
     s_mode = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 8, 8);
     lv_label_set_text(s_mode, "---");
-    s_wifi = plain(&lv_font_montserrat_20, lv_color_hex(C_TEXT), SCR_W - 52, 7);
-    s_batt = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 108, 8);
-    s_vfo  = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 186, 8);
+    /* Right-anchored, widest first: the battery sits against the panel edge,
+     * RSSI bars to its left, VFO label left of those. */
+    s_batt = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 44, 8);
+    lv_obj_set_style_text_align(s_batt, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_size(s_batt, 40, 16);
+    s_wifi = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 84, 8);
+    lv_obj_set_style_text_align(s_wifi, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_size(s_wifi, 34, 16);
+    s_vfo  = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 172, 8);
     lv_obj_set_style_text_align(s_vfo, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_width(s_vfo, 70);
     /* The bar is tall so its lower edge clears the corner mask, but the orange
@@ -274,25 +315,32 @@ static void build_screen(void)
     lv_obj_set_style_transform_pivot_y(s_freq, 0, 0);
     lv_label_set_text(s_freq, "---.---");
 
-    /* ── info row: S number + S bar on ONE line, filter, AF/SPK ── */
-    s_sunit = field(&lv_font_montserrat_14, 4, Y_INFO, 52, false);
+    /* ── row 1: band name (or FREQ / VOL / channel plate), then FIL, AF, SPAN ──
+     * The band label used to sit in the scope caption row; the operator wants it
+     * beside the readouts that share its timescale. */
+    /* Four plates must fit 240 px.  "FIL 2.4K" at Montserrat 14 needs ~62 px and
+     * the row wrapped onto the S-meter line; this build only compiles 14/20/28,
+     * so the labels are shortened to bare values in the same 14 px face —
+     * 2.4K / 0 / 200K are self-evident next to their own plates. */
+    s_bandplate = field(&lv_font_montserrat_14, 2, Y_INFO, 54, false);
+    lv_obj_set_style_text_color(s_bandplate, lv_color_hex(C_ACCENT), 0);
+    lv_label_set_text(s_bandplate, "---");
+    s_fil = field(&lv_font_montserrat_14, 59, Y_INFO, 62, false);
+    s_af  = field(&lv_font_montserrat_14, 124, Y_INFO, 58, false);
+    s_spanplate = field(&lv_font_montserrat_14, 185, Y_INFO, 53, true);
+    lv_label_set_text(s_spanplate, "--");
+
+    /* ── row 2: S-meter alone — unit text left, bar filling the rest ── */
+    s_sunit = field(&lv_font_montserrat_14, 2, Y_SMET, 52, false);
     s_sbar  = lv_bar_create(lv_screen_active());
-    lv_obj_set_size(s_sbar, 74, H_INFO - 4);
-    lv_obj_set_pos(s_sbar, 58, Y_INFO + 2);
+    lv_obj_set_size(s_sbar, SCR_W - 66, H_SMET - 4);
+    lv_obj_set_pos(s_sbar, 62, Y_SMET + 2);
     lv_bar_set_range(s_sbar, 0, 255);
     lv_obj_set_style_bg_color(s_sbar, lv_color_hex(C_FIELD_D), LV_PART_MAIN);
     lv_obj_set_style_radius(s_sbar, 2, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_sbar, lv_color_hex(C_ACCENT), LV_PART_INDICATOR);
     lv_obj_set_style_radius(s_sbar, 2, LV_PART_INDICATOR);
     lv_bar_set_value(s_sbar, 0, LV_ANIM_OFF);
-    s_fil = field(&lv_font_montserrat_14, 136, Y_INFO, 52, true);
-    s_af  = field(&lv_font_montserrat_14, 192, Y_INFO, 44, false);
-
-    /* ── scope caption row ── */
-    s_scope_lbl = plain(&lv_font_montserrat_14, lv_color_hex(C_ACCENT), 4, Y_LBL);
-    lv_label_set_text(s_scope_lbl, "SPECTRUM SCOPE");
-    s_span = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 42, Y_LBL);
-    lv_label_set_text(s_span, "100K");
 
     /* ── spectrum line ── */
     s_spec_line = lv_line_create(lv_screen_active());
@@ -400,7 +448,28 @@ static void refresh(void)
         lv_label_set_text(s_mode, st.mode_name[0] ? st.mode_name : "---");
         snprintf(b, sizeof b, "VFO %c", st.vfo ? st.vfo : 'A');
         lv_label_set_text(s_vfo, b);
-        draw_rssi(s_wifi, mrrc_net_rssi(), mrrc_net_up());
+        /* Live scope span: drives this plate and the three axis labels below. */
+        int32_t span = span_hz(st.scope_span);
+        char spanb[16];
+        format_span(spanb, sizeof spanb, span);
+        lv_label_set_text(s_spanplate, spanb);
+
+        /* Leftmost plate carries whatever the knob is pointed at — band name in
+         * FREQ mode, channel name in CH, speaker level in VOL. */
+        if (s_ui_mode == UI_MODE_VOL) {
+            snprintf(b, sizeof b, "%d%%", s_spk_pct);
+            lv_label_set_text(s_bandplate, b);
+        } else if (s_ui_mode == UI_MODE_CHANNEL && s_chan_lbl[0]) {
+            lv_label_set_text(s_bandplate, s_chan_lbl);
+        } else if (st.band_name[0]) {
+            lv_label_set_text(s_bandplate, st.band_name);
+        }
+
+        /* RSSI and battery do not move at 5 Hz — refresh them about every 2 s. */
+        if ((lv_tick_get() / 200) % 10 == 0) {
+            draw_rssi(s_wifi, mrrc_net_rssi(), mrrc_net_up());
+            update_battery();
+        }
 
         /* chips bar: knob mode | RX or TX seconds | link */
         const char *m = s_ui_mode == UI_MODE_VOL ? "VOL"
@@ -420,27 +489,17 @@ static void refresh(void)
 
         /* filter + AF live in the info row; SPK replaces AF in VOL mode */
         if (st.filter_hz > 0) {
-            snprintf(b, sizeof b, "FIL %d.%dK", st.filter_hz / 1000,
+            snprintf(b, sizeof b, "%d.%dK", st.filter_hz / 1000,
                      (st.filter_hz % 1000) / 100);
             lv_label_set_text(s_fil, b);
         } else {
             lv_label_set_text(s_fil, "");
         }
-        if (s_ui_mode == UI_MODE_VOL) {
-            snprintf(b, sizeof b, "SPK %d%%", s_spk_pct);
-            lv_label_set_text(s_af, b);
-            lv_obj_set_style_bg_color(s_af, lv_color_hex(C_FIELD), 0);
-        } else if (s_ui_mode == UI_MODE_CHANNEL) {
-            lv_label_set_text(s_af, s_chan_lbl);
-            lv_obj_set_style_bg_color(s_af, lv_color_hex(C_FIELD), 0);
-        } else {
-            snprintf(b, sizeof b, "AF %d", st.af_gain);
-            lv_label_set_text(s_af, b);
-            lv_obj_set_style_bg_color(s_af, lv_color_hex(C_FIELD_D), 0);
-        }
+        snprintf(b, sizeof b, "AF %d", st.af_gain);
+        lv_label_set_text(s_af, b);
 
         /* scale row around the VFO */
-        const int32_t half = k_span_hz / 2;
+        const int32_t half = span / 2;
         format_mhz(b, sizeof b, st.freq_hz - half);  lv_label_set_text(s_sc_l, b);
         format_mhz(b, sizeof b, st.freq_hz);         lv_label_set_text(s_sc_c, b);
         format_mhz(b, sizeof b, st.freq_hz + half);  lv_label_set_text(s_sc_r, b);
@@ -489,12 +548,6 @@ static void refresh(void)
         if (s_t > 1000) s_t = 1000;
     }
 
-    if (s_batt_pct >= 0) {
-        snprintf(b, sizeof b, "%d%%", s_batt_pct);
-        lv_label_set_text(s_batt, b);
-        lv_obj_set_style_text_color(s_batt,
-            lv_color_hex(s_batt_charging ? C_GREEN : C_TEXT), 0);
-    }
 }
 
 static void ui_timer_cb(lv_timer_t *t) { (void)t; refresh(); }

@@ -94,6 +94,12 @@ static int apply_field(const char *k, cJSON *v)
         st->filter_hz = (int)v->valuedouble;
         return 1;
     }
+    /* SS05 index, not a frequency: 6 means 100 kHz.  The scope axis labels and
+     * the waterfall's Hz-per-pixel both derive from this. */
+    if (!strcmp(k, "scope_span") && cJSON_IsNumber(v)) {
+        st->scope_span = (int)v->valuedouble;
+        return 1;
+    }
     if (!strcmp(k, "serial_connected") && cJSON_IsBool(v)) {
         st->radio_online = cJSON_IsTrue(v);
         return 1;
