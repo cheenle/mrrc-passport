@@ -168,7 +168,12 @@ audio          <1%
 |---|---|---|---|
 | 8 行 | 3.8% | 58-60% | 46K |
 | 12 行 | 5.6% | 43-49% | 44K |
-| **32 行 + FAST_MEM_IRAM** | **10.0%** | **20-26%** | 24K |
+| 32 行 + FAST_MEM_IRAM | 10.0% | 20-26% | 18K ← 余量不足 |
+| **24 行 + FAST_MEM_IRAM（当前）** | **7.5%** | **23%** | **24K** |
+
+最终停在 24 行：32 行的 CPU 略好，但 `largest` 只剩 18 KB，距 PTT 的 TLS
+需要的 ~16 KB 只有 2 KB 余量 —— 在一颗同时跑 Wi-Fi、音频和渲染器的芯片上
+不够安全。用 3 个百分点 CPU 换回 6 KB 连续内存。
 
 配套启用 `CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y`（官方单列的加速项：
 把最热的 LVGL 函数放进 IRAM，免去 flash cache 等待）。
@@ -371,3 +376,73 @@ audio drops: lock=0 full=5    (0.46%)
 3. 只开 RGB565 一种像素格式
 4. 绘制缓冲 8 → 12 或 16（**改完必须测 `largest`**）
 5. 瀑布改手动 flush，绕开 LVGL 脏区机制（改动大）
+
+
+---
+
+## 11. 编译与统计开关
+
+| 项 | 值 | 结论 |
+|---|---|---|
+| `CONFIG_COMPILER_OPTIMIZATION_PERF` | `-O2` | **保持**。flash 还剩 83%，不缺空间；CPU 是瓶颈，`-Os` 会慢 5-15%，`-O3` 只快 2-5% 且有编译器激进优化风险 |
+| `CONFIG_MRRC_PROFILE` | **关闭** | 曾开着，每分钟 dump 一次 CPU/堆/解码统计 |
+| `CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS` | **关闭** | 曾开着 —— **每个 FreeRTOS tick 都执行计时钩子**，是排查期最大的一笔常驻开销 |
+| `OPTIMIZATION_ASSERTIONS_ENABLE` | 开 | 保留，排查期有用 |
+| `STACK_CHECK_MODE_NONE` | 关 | 正确，省开销 |
+
+排查期间加过、现已全部移除的诊断代码：
+
+- `mrrc_audio_drop_detail()` 的 lock/full 分类计数
+- LVGL 事件注册计数日志（判定修复保留）
+- `update_plot()` 里的 `plot:` 频谱数值 dump
+- `mrrc_ui.c` 中未使用的 `esp_log.h`
+
+保留的轻量日志：启动期 5 次 `HEAP <stage>` 分段统计，以及每 60 秒一行
+`idle free=... audio(frames=... err=... drop=...)`。
+
+## 12. 已放弃的方案
+
+### I8 调色板瀑布（历史文档 Stage 3）
+
+目标是缓冲减半（40 行 18.8 KB → 9.4 KB），理论上还能把瀑布恢复到 60 行。
+实测发现 LVGL 的实现不允许这样做：
+
+```c
+void lv_draw_buf_set_palette(lv_draw_buf_t *draw_buf, uint8_t index, lv_color32_t color)
+{
+    lv_color32_t *palette = (lv_color32_t *)draw_buf->data;
+    palette[index] = color;        /* 调色板写在像素缓冲的开头 */
+}
+```
+
+**调色板和像素数据共用同一块缓冲**：调色板占前 256 字节，而瀑布推送从
+offset 0 开始写索引，两者互相覆盖 —— 表现是瀑布整块不可见。
+要支持需要自己给调色板留空间并让 canvas 指向偏移后的像素区，改动面比收益大。
+
+### Q8 定点 EMA 的一次踩坑
+
+第一版把原始值直接加进 Q8 累加器（漏了 `<< 8`），累加器衰减到 0，
+频谱画成贴底直线。诊断输出救了这个 bug：
+
+```
+plot: v=0..0  y=44..44  raw0=109 raw1=115    <- raw 有值，>>8 后全 0
+```
+
+## 13. 最终配置速查
+
+```
+BSP_LVGL_DRAW_BUFFER_LINES   24          显示缓冲区行数
+CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM  y LVGL 热函数进 IRAM
+FFT_ALPHA_Q8                 77 (=0.30)  Q8 定点 EMA
+REFRESH_MS                   300         3.3 Hz
+WF_H                         40          瀑布行数 (RGB565 18.8 KB)
+PLOT_H                       45          频谱高
+AUD_RB_BYTES                 8192        ~250 ms 抖动缓冲
+swapp_bytes                  false       面板侧 RAMCTRL(0xB0) 小端
+CONFIG_COMPILER_OPTIMIZATION_PERF      y  -O2
+CONFIG_MRRC_PROFILE                     n
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS n
+```
+
+稳态实测：`taskLVGL 23%`、`IDLE 56%`、`free 55K / largest 25K`、
+`err=0`、丢帧稳定不再增长。

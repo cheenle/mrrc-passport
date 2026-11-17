@@ -14,14 +14,18 @@ static const char *TAG = "bsp_lvgl";
  * needs ~16 KB in one piece for a TLS record — with the waterfall and audio
  * ring also enlarged the largest free block fell far enough that transmissions
  * dropped on their own.  Left at 8; the extra transfers are the cheaper price. */
-/* 32 lines = 15.0 KB (7680 px).
+/* 24 lines = 11.3 KB (5760 px, 7.5% of the panel).
  *
  * Espressif's own LVGL performance guide is explicit about this setting:
  * a frame buffer below 10% of the screen has a "severe negative effect", and
  * above ~25% brings no further gain.  On a 240x320 panel that puts the useful
- * window at 7680..19200 px.  8 lines was 3.8%, 12 lines 5.6%, 24 lines 7.5% —
- * all under the floor.  32 lines is exactly 10.0%, the first setting the guide
- * calls adequate.
+ * window at 7680..19200 px.  8 lines was 3.8%, 12 lines 5.6%.
+ *
+ * 32 lines (10.0%) is the first setting inside the guide's window and measured
+ * 20-26% taskLVGL, but it left the largest free block at 18 KB — only 2 KB
+ * above the ~16 KB contiguous a PTT TLS record needs, which is not enough
+ * margin on a part that also runs Wi-Fi, audio and the renderer.  24 lines
+ * trades a few points of CPU for a safe heap.
  *
  * Measured: 8 lines -> 58% taskLVGL, 12 lines -> 43-49%, so the curve is real.
  * Costs 9.4 KB of contiguous internal RAM beyond the 12-line version; largest
@@ -31,7 +35,7 @@ static const char *TAG = "bsp_lvgl";
  *
  * If colours or the display come up wrong after this, suspect the RAMCTRL /
  * swap_bytes pairing in bsp_display.c before suspecting the size. */
-#define BSP_LVGL_DRAW_BUFFER_LINES 32
+#define BSP_LVGL_DRAW_BUFFER_LINES 24
 
 static lv_display_t *s_disp;
 static bool s_port_initialized;
@@ -130,13 +134,11 @@ lv_display_t *bsp_lvgl_init(void) {
         // LVGL 9.5 returns void here; check the list while still holding the lock.
         const uint32_t count = lv_display_get_event_count(disp);
         lv_display_add_event_cb(disp, rounded_flush_event, LV_EVENT_FLUSH_START, NULL);
-        const uint32_t after = lv_display_get_event_count(disp);
-        ESP_LOGI(TAG, "display=%p events %u -> %u (expect %u)",
-                 (void *)disp, (unsigned)count, (unsigned)after, (unsigned)(count + 1));
         /* Some LVGL 9 builds coalesce event_cb entries per event code, so the
-         * count may not grow even though the callback was accepted.  Treat a
-         * successful add as success unless the count went DOWN. */
-        mask_registered = (after >= count);
+         * count may not grow by exactly one even though the callback was
+         * accepted.  Treat anything but a decrease as success — a strict
+         * `== count + 1` failed the whole display init (black screen). */
+        mask_registered = (lv_display_get_event_count(disp) >= count);
     }
     if (!mask_registered) {
         ESP_LOGE(TAG, "LVGL display 或圆角回调注册失败");

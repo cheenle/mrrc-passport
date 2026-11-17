@@ -109,12 +109,21 @@ static void knob_step(bsp_btn_t btn)
     mrrc_net_set_freq(cur + dir * 1000);
 }
 
+/* Heap by capability, not just a single total.
+ *
+ * "free" and "largest" hide what matters here: this part has no PSRAM, DMA
+ * descriptors and the LVGL draw buffer must live in DMA-capable internal RAM,
+ * and the TLS handshake needs ~16 KB *contiguous*.  Printing the split per
+ * stage shows which subsystem ate the block when a number drops. */
 static void mem_report(const char *stage)
 {
-    ESP_LOGW(TAG, "HEAP %-14s free=%5uK largest=%5uK",
+    ESP_LOGW(TAG, "HEAP %-14s free=%uK largest=%uK | dma=%uK/%uK | min=%uK",
              stage,
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_DMA) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_DMA) / 1024),
+             (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024));
 }
 
 /* Runs on the shared esp_timer task: enqueue and return.  Nothing else. */
@@ -413,12 +422,7 @@ void app_main(void)
         unsigned k = 0, kf = 0, kfr = 0, ksf = 0, krf = 0, kld = 0;
         mrrc_tx_stats(&k, &kf, &kfr, &ksf, &krf, &kld);
         if (s_audio_task_h)
-            {
-            uint32_t dl = 0, df = 0;
-            mrrc_audio_drop_detail(&dl, &df);
-            ESP_LOGI(TAG, "audio drops: lock=%u full=%u", (unsigned)dl, (unsigned)df);
-        }
-        ESP_LOGI(TAG, "stack: audio min free=%u B",
+            ESP_LOGI(TAG, "stack: audio min free=%u B",
                      (unsigned)(uxTaskGetStackHighWaterMark(s_audio_task_h)));
         ESP_LOGI(TAG, "tx: keys=%u fails=%u frames=%u sendfail=%u readfail=%u "
                       "linkdowns=%u last=%s",

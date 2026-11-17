@@ -160,10 +160,21 @@ static uint8_t s_cur[SCR_W];
 static uint32_t s_t;            /* 0..1000 progress from prev to cur */
 static bool s_started;
 
-/* Handheld trace model: 30 % new data per frame, then a 2x amplitude boost. */
-#define FFT_ALPHA 0.30f
-#define FFT_BOOST 2.0f
-static float s_fft[SCR_W];
+/* Handheld trace model: 30 % new data per frame, then a 2x amplitude boost.
+ *
+ * The EMA runs in Q8 fixed point.  This part has no FPU, so 0.30f costs a
+ * software float multiply-add per column per frame; 77/256 = 0.30078 is within
+ * 0.3 % of the same factor in one integer multiply and a shift.  (The absolute
+ * saving is small — 240 columns at 3.3 Hz — but it is free and keeps float out
+ * of the render loop.)
+ *
+ * The input must be shifted into the same Q8 scale: adding the raw value was
+ * the first version's bug, and it made the accumulator decay to zero, so the
+ * trace drew as a flat line at the bottom. */
+#define FFT_ALPHA_Q8   77       /* 77/256  = 0.30078 */
+#define FFT_ONE_Q8    256
+#define FFT_BOOST_X2    2
+static uint16_t s_fft[SCR_W];   /* EMA accumulator, Q8 */
 static bool s_fft_primed;
 
 static uint32_t s_last_seq = 0xFFFFFFFF;
@@ -439,21 +450,33 @@ static void build_screen(void)
 /* Mirrors the handheld's fft_update(): EMA over the peak-downsampled columns. */
 static void fft_update(const uint8_t *cols)
 {
+    const uint32_t keep = FFT_ONE_Q8 - FFT_ALPHA_Q8;   /* 179/256 */
     for (int x = 0; x < SCR_W; x++) {
-        if (!s_fft_primed) s_fft[x] = (float)cols[x];
-        else s_fft[x] = s_fft[x] * (1.0f - FFT_ALPHA) + (float)cols[x] * FFT_ALPHA;
+        const uint32_t in = (uint32_t)cols[x] << 8;    /* into Q8 */
+        if (!s_fft_primed) s_fft[x] = (uint16_t)in;
+        else s_fft[x] = (uint16_t)(((uint32_t)s_fft[x] * keep
+                                    + in * FFT_ALPHA_Q8) >> 8);
     }
     s_fft_primed = true;
 }
 
 static void update_plot(bool tx)
 {
-    const int range = SCOPE_CEIL - SCOPE_FLOOR;
+    /* Integer form of the original float mapping:
+     *   mapped = (v - FLOOR) / (CEIL - FLOOR) * 2, clamped to 0..1
+     *   y      = (PLOT_H-1) - mapped * (PLOT_H-1)
+     * `t` holds the clamped position scaled by 65535 so both divisions stay
+     * exact without float. */
+    const int32_t range = SCOPE_CEIL - SCOPE_FLOOR;
     for (int x = 0; x < SCR_W; x++) {
-        float mapped = (s_fft[x] - (float)SCOPE_FLOOR) / (float)range * FFT_BOOST;
-        if (mapped < 0.0f) mapped = 0.0f;
-        if (mapped > 1.0f) mapped = 1.0f;
-        s_pts[x].y = (PLOT_H - 1) - (int)(mapped * (PLOT_H - 1));
+        const int32_t v = (int32_t)s_fft[x] >> 8;      /* Q8 -> whole units */
+        int32_t t = 0;
+        if (v > SCOPE_FLOOR) {
+            int64_t q = (int64_t)(v - SCOPE_FLOOR) * FFT_BOOST_X2 * 65535 / range;
+            if (q > 65535) q = 65535;
+            t = (int32_t)q;
+        }
+        s_pts[x].y = (PLOT_H - 1) - (int32_t)((int64_t)t * (PLOT_H - 1) / 65535);
     }
     lv_obj_set_style_line_color(s_spec_line,
                                 lv_color_hex(tx ? C_RED : C_BLUE), 0);
