@@ -38,15 +38,19 @@
 #include "mrrc_net.h"
 #include "mrrc_ui.h"
 
-/* 300 ms (3.3 Hz).
+/* 190 ms (5.26 Hz) — matched to the radio's own sweep rate.
  *
- * LVGL measures 55% of this chip's CPU at a 200 ms tick, and the audio task
- * (which needs to feed a blocking I2S write every 20 ms) only gets <1% — so
- * the UI ticks are directly stealing the audio path's scheduling slots and the
- * ring overflows.  The scope is the cheapest thing to give up: at 3.3 Hz the
- * waterfall still advances at every third sweep or so, while LVGL's share drops
- * by a third. */
-#define REFRESH_MS 300
+ * The "high" spectrum profile delivers one frame per radio sweep, measured at
+ * ~5.3 frames/s.  The tick was 300 ms (3.3 Hz), which meant two or three frames
+ * arrived between renders and s_bins_new — a bool — kept only the last one:
+ * about 38% of the sweeps were dropped, and the waterfall filled the gap by
+ * interpolating between the previous and current frame, so most of its rows
+ * were synthesised rather than measured.
+ *
+ * At 190 ms each real sweep gets its own render and its own waterfall row.
+ * CPU cost measured separately; the 24-line draw buffer leaves enough headroom
+ * for it. */
+#define REFRESH_MS 190
 
 /* ── palette ────────────────────────────────────────────────────────────
  * THE VALUES BELOW ARE 24-BIT HEX, NOT RGB565.  They are handed to
@@ -157,7 +161,6 @@ static volatile bool s_bins_new;
 static uint8_t s_cols[SCR_W];
 static uint8_t s_prev[SCR_W];
 static uint8_t s_cur[SCR_W];
-static uint32_t s_t;            /* 0..1000 progress from prev to cur */
 static bool s_started;
 
 /* Handheld trace model: 30 % new data per frame, then a 2x amplitude boost.
@@ -490,12 +493,18 @@ static void wf_push(int t_permille)
      * the handheld (whose ring buffer draws row 0 as the newest sample). */
     memmove(s_wf_buf + SCR_W, s_wf_buf, sizeof(s_wf_buf) - SCR_W * sizeof(uint16_t));
     uint16_t *last = s_wf_buf;
-    for (int x = 0; x < SCR_W; x++) {
-        const int v = s_prev[x] + ((int)s_cur[x] - (int)s_prev[x]) * t_permille / 1000;
-        const int idx = BINS_TO_IDX(v);
-        /* idx 0 is the palette floor, but a cold bin used to be painted pure
-         * black, which reads as "no data"; keep the dark-blue floor visible. */
-        last[x] = s_heat[idx];
+    if (t_permille >= 1000) {
+        /* Whole-row push: the tick now matches the sweep rate, so the row is
+         * the measured frame with no interpolation at all. */
+        for (int x = 0; x < SCR_W; x++)
+            last[x] = s_heat[BINS_TO_IDX(s_cur[x])];
+    } else {
+        for (int x = 0; x < SCR_W; x++) {
+            const int v = s_prev[x] + ((int)s_cur[x] - (int)s_prev[x]) * t_permille / 1000;
+            /* idx 0 is the palette floor, but a cold bin used to be painted
+             * pure black, which reads as "no data"; keep the floor visible. */
+            last[x] = s_heat[BINS_TO_IDX(v)];
+        }
     }
     lv_obj_invalidate(s_wf_img);
 }
@@ -601,6 +610,7 @@ static void refresh(void)
         s_last_meter = st.meter_seq;
     }
 
+    bool got_sweep = false;
     if (s_bins_new) {
         s_bins_new = false;
         /* Peak downsample 850 -> 240: averaging hides narrow signals. */
@@ -613,11 +623,11 @@ static void refresh(void)
                 if (s_bins[i] > peak) peak = s_bins[i];
             s_cols[x] = peak;
         }
-        if (s_started) memcpy(s_prev, s_cur, SCR_W);
+            if (s_started) memcpy(s_prev, s_cur, SCR_W);
         else { memcpy(s_prev, s_cols, SCR_W); s_started = true; }
         memcpy(s_cur, s_cols, SCR_W);
-        s_t = 0;
         fft_update(s_cols);
+        got_sweep = true;
     }
 
     /* Skip the scope while transmitting.
@@ -627,16 +637,14 @@ static void refresh(void)
      * consumer on this chip (measured 49% at 10 Hz ticks, 27% at 5 Hz); every
      * cycle it takes is one the WebSocket task does not get, and starving that
      * task is what dropped the link mid-transmission. */
-    if (s_started && !tx) {
+    /* Only redraw when a sweep actually arrived.  The tick and the sweep rate
+     * are matched now, so this is normally once per tick; the guard just avoids
+     * repainting the same data when they drift out of phase. */
+    if (got_sweep && !tx) {
         update_plot(tx);
-        /* Two rows per tick at 5 ticks/s = 10 rows/s, so the WF_H-row history
-         * scrolls in about six seconds.  One row per tick looked frozen. */
-        for (int r = 0; r < 2; r++) {
-            const int t = (int)s_t + (r * (1000 - (int)s_t)) / 2;
-            wf_push(t);
-        }
-        s_t += (uint32_t)(REFRESH_MS * 1000u) * 1000u / 189000u;   /* ~5.3 Hz */
-        if (s_t > 1000) s_t = 1000;
+        /* One row per sweep, measured — the tick now matches the radio, so no
+         * interpolation is involved.  1000 means "use s_cur as-is". */
+        wf_push(1000);
     }
 
 }
