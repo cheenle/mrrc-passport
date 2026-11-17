@@ -74,8 +74,8 @@
 #define H_INFO      17
 #define Y_SMET      107         /* row 2: the S-meter, on its own line */
 #define H_SMET      18
-#define Y_PLOT      128         /* caption row reclaimed for the plot */
-#define PLOT_H      66
+#define Y_PLOT      136         /* pushed down: the gap above it read as dead space */
+#define PLOT_H      62
 #define Y_WF        202
 #define WF_H        30                  /* RGB565: 240*30*2 = 14.4 KB */
 #define Y_SCALE     236
@@ -417,8 +417,10 @@ static void update_plot(bool tx)
 /* Scroll one row and paint the newest through Jet. */
 static void wf_push(int t_permille)
 {
-    memmove(s_wf_buf, s_wf_buf + SCR_W, sizeof(s_wf_buf) - SCR_W * sizeof(uint16_t));
-    uint16_t *last = s_wf_buf + (WF_H - 1) * SCR_W;
+    /* Newest row on top, older rows pushed down — time flows downward, matching
+     * the handheld (whose ring buffer draws row 0 as the newest sample). */
+    memmove(s_wf_buf + SCR_W, s_wf_buf, sizeof(s_wf_buf) - SCR_W * sizeof(uint16_t));
+    uint16_t *last = s_wf_buf;
     for (int x = 0; x < SCR_W; x++) {
         const int v = s_prev[x] + ((int)s_cur[x] - (int)s_prev[x]) * t_permille / 1000;
         const int idx = BINS_TO_IDX(v);

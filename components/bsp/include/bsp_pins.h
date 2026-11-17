@@ -62,7 +62,9 @@
 // 长按组件默认 1500ms,要按住 1.5s 才触发,在这台三键小设备上明显偏迟钝,收敛到 500ms。
 // (组件对 BUTTON_LONG_PRESS_TIME_MS 的 Kconfig 下限同样是 500ms,想再短只能在代码里下发。)
 #define BSP_BTN_SHORT_PRESS_MS  180   // 短按(单击)判定窗口
-#define BSP_BTN_LONG_PRESS_MS   500   // 长按触发时间
+/* 500 ms before auto-repeat started felt sticky when sweeper-tuning the
+ * knob; 350 ms still leaves the 180 ms click window unambiguous. */
+#define BSP_BTN_LONG_PRESS_MS   350   // 长按触发时间
 
 // 按键锁(在电压解码层,早于 button 组件的事件判定):
 // 按住的键触点短暂断开时,电压会一路扫过上方各键的窗口;组件自身去抖只有约 10ms,

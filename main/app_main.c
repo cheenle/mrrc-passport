@@ -130,9 +130,9 @@ static void keys_task(void *arg)
     (void)arg;
     key_ev_t e;
     bool ptt_on = false;
-    /* Auto-repeat: hold UP/DOWN to sweep.  450 ms before the first repeat, then
-     * one step every 120 ms, matching the xz-02 handset so the muscle memory
-     * carries over. */
+    /* Auto-repeat: hold UP/DOWN to sweep.  350 ms before the first repeat, then
+     * one step every 90 ms — the handset's 450/120 felt sticky when sweeper
+     * tuning, and the ADC key itself resolves a fresh press within ~20 ms. */
     bool repeat = false;
     /* iot_button's BUTTON_DOUBLE_CLICK never fires on this board: the BSP key
      * lock reports the release 120 ms late, so the second tap lands inside the
@@ -145,12 +145,17 @@ static void keys_task(void *arg)
      * tap falls into that hole and no CLICK ever arrives.  Measure the press
      * ourselves from PRESS/RELEASE instead. */
     int64_t ok_press_us = 0;
-    /* Double/triple tap arbitration: a tap increments the counter and pushes a
-     * 600 ms deadline.  The double-tap action fires only when that deadline
-     * expires without a third tap, so triple-tap is unambiguous — at the cost
-     * of 600 ms of latency on the double tap. */
+    /* Double/triple tap arbitration.
+     *
+     * The old scheme waited out the full 600 ms window before acting on a
+     * double tap, so every knob-mode change felt stuck, then landed.  Now the
+     * double tap fires the moment the second tap is released — the action the
+     * operator asked for happens immediately — and a third tap inside the
+     * window is treated as "and also cycle the mode", which is exactly the
+     * triple-tap job.  Nothing is latched, so a late third tap just starts a
+     * new sequence. */
     int tap_count = 0;
-    int64_t tap_deadline = 0;
+    int64_t tap_deadline = 0;          /* only used to recognise a 3rd tap */
     bsp_btn_t repeat_btn = BSP_BTN_UP;
     int64_t repeat_at = 0;
 
@@ -160,24 +165,19 @@ static void keys_task(void *arg)
             const int64_t left = repeat_at - esp_timer_get_time();
             wait = left <= 0 ? 0 : pdMS_TO_TICKS((left + 999) / 1000);
         } else if (tap_deadline) {
-            wait = pdMS_TO_TICKS(50);   /* poll so the tap window can expire */
+            /* Just a timer to close the window; nothing is deferred any more. */
+            const int64_t left = tap_deadline - esp_timer_get_time();
+            wait = left <= 0 ? 0 : pdMS_TO_TICKS((left + 999) / 1000);
         }
 
         if (xQueueReceive(s_key_q, &e, wait) != pdTRUE) {
             if (repeat) {
                 knob_step(repeat_btn);
-                repeat_at = esp_timer_get_time() + 120000;
+                repeat_at = esp_timer_get_time() + 90000;
             }
-            if (tap_count == 2 && tap_deadline && esp_timer_get_time() > tap_deadline) {
-                tap_count = 0;
+            if (tap_deadline && esp_timer_get_time() > tap_deadline) {
                 tap_deadline = 0;
-                /* Double tap: FREQ -> CHANNEL -> VOL -> FREQ */
-                s_ui_mode = (ui_mode_t)((s_ui_mode + 1) % 3);
-                mrrc_ui_set_mode(s_ui_mode, s_spk_vol);
-                const char *nm = s_ui_mode == UI_MODE_CHANNEL ? "CH"
-                               : (s_ui_mode == UI_MODE_VOL ? "VOL" : "FREQ");
-                mrrc_ui_set_toast(nm);
-                ESP_LOGI(TAG, "mode -> %s", nm);
+                tap_count = 0;
             }
             continue;
         }
@@ -224,7 +224,7 @@ static void keys_task(void *arg)
                 knob_step(e.btn);
                 repeat = true;
                 repeat_btn = e.btn;
-                repeat_at = esp_timer_get_time() + 450000;
+                repeat_at = esp_timer_get_time() + 90000;
             }
             continue;
         }
@@ -239,14 +239,19 @@ static void keys_task(void *arg)
             const int64_t held = ok_press_us ? now - ok_press_us : 0;
             ok_press_us = 0;
             if (held > 0 && held < 500000) {          /* a tap, not a keying */
-                if (now < tap_deadline) {
-                    tap_count++;
-                } else {
-                    tap_count = 1;
-                }
-                tap_deadline = now + 600000;          /* 600 ms to add a tap */
+                tap_count = (now < tap_deadline) ? tap_count + 1 : 1;
+                tap_deadline = now + 450000;          /* window for a further tap */
                 ok_click_us = now;
-                if (tap_count == 3) {                 /* triple: cycle mode */
+
+                if (tap_count == 2) {
+                    /* Act now — no waiting for the window to close. */
+                    s_ui_mode = (ui_mode_t)((s_ui_mode + 1) % 3);
+                    mrrc_ui_set_mode(s_ui_mode, s_spk_vol);
+                    const char *nm = s_ui_mode == UI_MODE_CHANNEL ? "CH"
+                                   : (s_ui_mode == UI_MODE_VOL ? "VOL" : "FREQ");
+                    mrrc_ui_set_toast(nm);
+                    ESP_LOGI(TAG, "mode -> %s", nm);
+                } else if (tap_count >= 3) {          /* third tap: cycle mode too */
                     tap_count = 0;
                     tap_deadline = 0;
                     mrrc_net_next_mode();
