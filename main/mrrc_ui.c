@@ -150,7 +150,11 @@ static void heat_init(void)
 
 /* Spectrum: lv_line stores only the 240 vertex coordinates (960 B) and LVGL
  * rasterises the stroke, so PLOT_H costs nothing in RAM. */
-static lv_point_precise_t s_pts[BINS > SCR_W ? BINS : SCR_W];
+/* Only SCR_W vertices are ever handed to lv_line — the 850 bins are
+ * peak-downsampled to one per column before this.  The array was sized
+ * max(BINS, SCR_W) = 850, which wasted 4880 bytes of .bss for points that were
+ * never passed to the renderer. */
+static lv_point_precise_t s_pts[SCR_W];
 static uint16_t s_wf_buf[SCR_W * WF_H];
 
 /* Waterfall scrolling: sweeps arrive at ~5.3 Hz while the UI ticks at 5 Hz.
@@ -159,7 +163,6 @@ static uint16_t s_wf_buf[SCR_W * WF_H];
 static volatile uint8_t s_bins[BINS];
 static volatile bool s_bins_new;
 static uint8_t s_cols[SCR_W];
-static uint8_t s_prev[SCR_W];
 static uint8_t s_cur[SCR_W];
 static bool s_started;
 
@@ -487,25 +490,17 @@ static void update_plot(bool tx)
 }
 
 /* Scroll one row and paint the newest through Jet. */
-static void wf_push(int t_permille)
+static void wf_push(void)
 {
     /* Newest row on top, older rows pushed down — time flows downward, matching
      * the handheld (whose ring buffer draws row 0 as the newest sample). */
     memmove(s_wf_buf + SCR_W, s_wf_buf, sizeof(s_wf_buf) - SCR_W * sizeof(uint16_t));
     uint16_t *last = s_wf_buf;
-    if (t_permille >= 1000) {
-        /* Whole-row push: the tick now matches the sweep rate, so the row is
-         * the measured frame with no interpolation at all. */
-        for (int x = 0; x < SCR_W; x++)
-            last[x] = s_heat[BINS_TO_IDX(s_cur[x])];
-    } else {
-        for (int x = 0; x < SCR_W; x++) {
-            const int v = s_prev[x] + ((int)s_cur[x] - (int)s_prev[x]) * t_permille / 1000;
-            /* idx 0 is the palette floor, but a cold bin used to be painted
-             * pure black, which reads as "no data"; keep the floor visible. */
-            last[x] = s_heat[BINS_TO_IDX(v)];
-        }
-    }
+    /* One measured sweep per row.  The tick matches the radio's sweep rate, so
+     * there is nothing to interpolate between — the old code blended s_prev and
+     * s_cur to fake the rows the slow tick could not produce. */
+    for (int x = 0; x < SCR_W; x++)
+        last[x] = s_heat[BINS_TO_IDX(s_cur[x])];
     lv_obj_invalidate(s_wf_img);
 }
 
@@ -623,9 +618,8 @@ static void refresh(void)
                 if (s_bins[i] > peak) peak = s_bins[i];
             s_cols[x] = peak;
         }
-            if (s_started) memcpy(s_prev, s_cur, SCR_W);
-        else { memcpy(s_prev, s_cols, SCR_W); s_started = true; }
         memcpy(s_cur, s_cols, SCR_W);
+        s_started = true;
         fft_update(s_cols);
         got_sweep = true;
     }
@@ -642,9 +636,8 @@ static void refresh(void)
      * repainting the same data when they drift out of phase. */
     if (got_sweep && !tx) {
         update_plot(tx);
-        /* One row per sweep, measured — the tick now matches the radio, so no
-         * interpolation is involved.  1000 means "use s_cur as-is". */
-        wf_push(1000);
+        /* One row per sweep, measured. */
+        wf_push();
     }
 
 }
