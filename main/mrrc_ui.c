@@ -1,16 +1,30 @@
-// main/mrrc_ui.c — 240x320 ICOM-style layout.
+// main/mrrc_ui.c — the xz-02 handheld layout, ported to this 240x320 panel.
 //
-// Layout (y in px, screen is 240x320, round panel — the BSP masks the corners):
-//     4.. 34   mode badge (left)              battery (right)
-//    44..100   frequency, Montserrat 28
-//   104..124   band + filter
-//   140..170   S-meter bar + s_unit
-//   190..230   status chips: RX/TX | server link
-//   250..300   toast line
+// The reference is mrrc-handheld/main/ui.c: an ICOM-style fixed layout with a
+// flat chrome bar top and bottom, a "field" convention behind every small
+// label, and a spectrum + waterfall stack in the middle.  That firmware draws
+// straight into a 240x240 framebuffer; this one keeps LVGL (the BSP has no
+// second full framebuffer to give), so the same design is expressed with
+// styled labels, one lv_line and one lv_canvas.  Layout rows are kept at the
+// handheld's y offsets for the top block and given the extra 80 px of height
+// this panel has.
 //
-// The refresh task polls seq/meter_seq instead of being called from the WS
-// callback: LVGL is not thread safe, and the WebSocket task must never block
-// on a render.
+//   y   0.. 21  chrome bar: [LSB]              VFO A   87%   ⣿      (+ accent rule)
+//   y  26.. 78  frequency  "7.079.51"   white, RED on TX
+//   y  84..100  S-meter row:  S9+10 ▮▮▮▮▮▮░░   FIL 2.4K    AF 128
+//   y 106..117  SPECTRUM SCOPE                                    100K
+//   y 120..199  spectrum line plot (blue, RED on TX, centre marker)
+//   y 200..259  waterfall (Jet, newest row on top; 30 rows = 14.4 KB)
+//   y 262..273  scale: 7.029        7.079        7.129
+//   y 276..295  chips bar: FREQ | RX / TX 3 | LINK
+//   y 300..318  toast (overlaps nothing until it is needed)
+//
+// The waterfall is HALF the handheld'' height on purpose: that board has PSRAM,
+// this ESP32-C3 does not, and 60 rows (28.8 KB of .bss) took the largest free
+// internal block from 26 KB down to 9 KB — too little for TLS/cJSON on PTT.
+//
+// The refresh runs as an LVGL timer, not a separate task: LVGL is not thread
+// safe and the WebSocket callback must never block on a render.
 #include <stdio.h>
 #include <string.h>
 
@@ -24,186 +38,316 @@
 
 #define REFRESH_MS 200
 
+/* ── palette (verbatim from the handheld) ───────────────────────────────
+ * Frequency readout is white; chrome bars are one flat colour edge to edge,
+ * because separate badge/chip boxes read as coloured blobs on this panel.
+ * Scope colours do NOT come from here — they use the Jet table below. */
+#define C_BAR       0x2965      /* #2a2a2a — top and bottom bars */
+#define C_ORANGE    0xFD20      /* #ffa500 — web accent, the rule under the header */
+#define C_FIELD     0x39E7      /* #3a3a3a — text field background */
+#define C_FIELD_D   0x2104      /* #212121 — dimmer field */
+#define C_ACCENT    0xB901      /* bright orange, small accents only */
+#define C_FAINT     0x4200      /* ~25 % orange, barely-there marks */
+#define C_TEXT      0xFFFF
+#define C_RED       0xF800
+#define C_GREEN     0x07E0
+#define C_BLUE      0x3C1E      /* #3b82f6 — legible over both plots */
+
+/* ── layout ─────────────────────────────────────────────────────────── */
+#define SCR_W       240
+#define SCR_H       320
+#define H_HDR       22
+#define Y_FREQ      26
+#define Y_INFO      84
+#define H_INFO      17
+#define Y_LBL       106                 /* scope caption + toast anchor */
+#define Y_PLOT      120
+#define PLOT_H      80
+#define Y_WF        200
+#define WF_H        30                  /* RGB565: 240*30*2 = 14.4 KB */
+#define Y_SCALE     262
+#define Y_CHIPS     276
+#define H_CHIPS     20
+#define Y_TOAST     300
+
+#define BINS        850
+
+static lv_obj_t *s_bar_top, *s_mode, *s_vfo, *s_batt, *s_wifi;
 static lv_obj_t *s_freq;
-static lv_obj_t *s_mode;
-static lv_obj_t *s_band;
-static lv_obj_t *s_sunit;
-static lv_obj_t *s_sbar;
-static lv_obj_t *s_status;
-static lv_obj_t *s_link;
-static lv_obj_t *s_batt;
+static lv_obj_t *s_sunit, *s_sbar, *s_fil, *s_af;
+static lv_obj_t *s_scope_lbl, *s_span;
+static lv_obj_t *s_spec_line, *s_wf_img;
+static lv_obj_t *s_sc_l, *s_sc_c, *s_sc_r;
+static lv_obj_t *s_chip_mode, *s_chip_tx, *s_chip_link;
 static lv_obj_t *s_toast;
-
-/* ── scope ─────────────────────────────────────────────────────────────
- * One 850-bin frame arrives ~5 times per second on /WSterminal.  Rendering is
- * done into two L8 (8-bit luminance) buffers: RGB565 for both would need 38 KB
- * and this board has ~36 KB of largest free block.
- *   spectrum: 240 x SCOPE_H    trend of the current sweep
- *   waterfall: 240 x WF_H      history, newest row on top
- */
-#define SCOPE_W   240
-#define SCOPE_H    84          /* lv_line: vertex range only, costs no RAM */
-#define WF_H       30          /* RGB565: 240*30*2 = 14.4 KB */
-#define BINS      850
-
-/* Colours ported from the xz-02 firmware (mrrc-handheld/main/ui.c), which in
- * turn ports the web client's WF_PALETTES.jet.  The spectrum trace is that
- * firmware's C_BLUE (0x3C1E); the waterfall uses the 64-step Jet scale. */
-#define C_SCOPE_BLUE  0x3C1E
-
-static uint16_t s_heat[64];
-
-/* Jet: v=0 is the palette's dark blue floor, not black — a black waterfall
- * reads as "no data". */
-static void heat_init(void)
-{
-    for (int i = 0; i < 64; i++) {
-        const float v = i / 63.0f;
-        int r, g, b;
-        if (v < 0.125f) {
-            const float u = v / 0.125f;
-            r = 0; g = 0; b = (int)(128 + u * 127);
-        } else if (v < 0.375f) {
-            const float u = (v - 0.125f) / 0.25f;
-            r = 0; g = (int)(u * 255); b = 255;
-        } else if (v < 0.625f) {
-            const float u = (v - 0.375f) / 0.25f;
-            r = (int)(u * 255); g = 255; b = (int)(255 * (1 - u));
-        } else if (v < 0.875f) {
-            const float u = (v - 0.625f) / 0.25f;
-            r = 255; g = (int)(255 * (1 - u)); b = 0;
-        } else {
-            const float u = (v - 0.875f) / 0.125f;
-            r = (int)(255 * (1 - u * 0.5f)); g = 0; b = 0;
-        }
-        s_heat[i] = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
-    }
-}
 
 /* Fixed floor/ceiling, same as the browser defaults (Floor 71 / Ceil 233).
  * Adaptive AGC made the trace jump whenever a single carrier appeared. */
 #define SCOPE_FLOOR 71
 #define SCOPE_CEIL  233
-
 #define BINS_TO_IDX(v) \
     ((int)((v) <= SCOPE_FLOOR ? 0 : ((v) >= SCOPE_CEIL ? 63 : \
      ((v) - SCOPE_FLOOR) * 63 / (SCOPE_CEIL - SCOPE_FLOOR))))
 
-/* Spectrum: an lv_line stores only the 240 vertex coordinates (960 B) and LVGL
- * rasterises the stroke itself, so SCOPE_H costs nothing here. */
-static lv_point_precise_t s_spec_pts[SCOPE_W];
-static uint16_t s_wf_buf[SCOPE_W * WF_H];
-static lv_obj_t *s_spec_img;
-static lv_obj_t *s_wf_img;
+static uint16_t s_heat[64];
+
+/* Jet, ported from static/ft710_ui.js WF_PALETTES.jet.  v=0 is dark blue, not
+ * black: a black waterfall reads as "no data". */
+static void heat_init(void)
+{
+    for (int i = 0; i < 64; i++) {
+        const float v = i / 63.0f;
+        int r, g, b;
+        if (v < 0.125f)      { const float u = v / 0.125f;
+                               r = 0; g = 0; b = (int)(128 + u * 127); }
+        else if (v < 0.375f) { const float u = (v - 0.125f) / 0.25f;
+                               r = 0; g = (int)(u * 255); b = 255; }
+        else if (v < 0.625f) { const float u = (v - 0.375f) / 0.25f;
+                               r = (int)(u * 255); g = 255; b = (int)(255 * (1 - u)); }
+        else if (v < 0.875f) { const float u = (v - 0.625f) / 0.25f;
+                               r = 255; g = (int)(255 * (1 - u)); b = 0; }
+        else                 { const float u = (v - 0.875f) / 0.125f;
+                               r = (int)(255 * (1 - u * 0.5f)); g = 0; b = 0; }
+        s_heat[i] = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+    }
+}
+
+/* Spectrum: lv_line stores only the 240 vertex coordinates (960 B) and LVGL
+ * rasterises the stroke, so PLOT_H costs nothing in RAM. */
+static lv_point_precise_t s_pts[BINS > SCR_W ? BINS : SCR_W];
+static uint16_t s_wf_buf[SCR_W * WF_H];
+
+/* Waterfall scrolling: sweeps arrive at ~5.3 Hz while the UI ticks at 5 Hz.
+ * Pushing a row only when data lands makes the history jump, so the previous
+ * and current sweeps are interpolated once per tick instead. */
 static volatile uint8_t s_bins[BINS];
 static volatile bool s_bins_new;
-static uint8_t s_scope_cols[SCOPE_W];
-/* Waterfall scrolling: frames arrive at ~5.3 Hz but the UI refreshes at 6.7 Hz.
- * Pushing a row only when data arrives makes the history jump; instead the
- * previous and current sweeps are interpolated once per refresh tick. */
-static uint8_t s_prev_cols[SCOPE_W];
-static uint8_t s_cur_cols[SCOPE_W];
-static uint32_t s_wf_t;        /* 0..1000 progress from prev to cur */
-static bool s_wf_started;
+static uint8_t s_cols[SCR_W];
+static uint8_t s_prev[SCR_W];
+static uint8_t s_cur[SCR_W];
+static uint32_t s_t;            /* 0..1000 progress from prev to cur */
+static bool s_started;
+
+/* Handheld trace model: 30 % new data per frame, then a 2x amplitude boost. */
+#define FFT_ALPHA 0.30f
+#define FFT_BOOST 2.0f
+static float s_fft[SCR_W];
+static bool s_fft_primed;
 
 static uint32_t s_last_seq = 0xFFFFFFFF;
 static uint32_t s_last_meter = 0xFFFFFFFF;
 static int s_batt_pct = -1;
+static bool s_batt_charging;
 static ui_mode_t s_ui_mode = UI_MODE_FREQ;
 static int s_spk_pct = 60;
-static bool s_mode_dirty = true;
+static char s_chan_lbl[24];
 
-/* 7.215.00 — the last three digits are Hz/10, matching the xz-02 layout. */
+/* The span column shows the scope window; the handheld reads it from
+ * st.scope_span, which this build does not receive, so it is a fixed default. */
+static const int32_t k_span_hz = 100000;
+
+/* 7.079.51 — last two digits are Hz/10, matching the handheld. */
 static void format_freq(char *out, size_t n, int32_t hz)
 {
-    if (hz <= 0) {
-        snprintf(out, n, "----.--");
-        return;
-    }
-    const int32_t mhz = hz / 1000000;
-    const int32_t khz = (hz % 1000000) / 1000;
-    const int32_t units = (hz % 1000) / 10;
-    snprintf(out, n, "%ld.%03ld.%02ld", (long)mhz, (long)khz, (long)units);
+    if (hz <= 0) { snprintf(out, n, "----.--"); return; }
+    snprintf(out, n, "%ld.%03ld.%02ld",
+             (long)(hz / 1000000), (long)((hz / 1000) % 1000), (long)((hz % 1000) / 10));
 }
 
-static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, lv_color_t color, int x, int y)
+static void format_mhz(char *out, size_t n, int32_t hz)
 {
-    lv_obj_t *l = lv_label_create(parent);
+    if (hz < 0) hz = 0;
+    snprintf(out, n, "%ld.%03ld", (long)(hz / 1000000), (long)((hz / 1000) % 1000));
+}
+
+/* ── widgets ────────────────────────────────────────────────────────── */
+
+static lv_obj_t *bar(int y, int h)
+{
+    lv_obj_t *o = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(o, SCR_W, h);
+    lv_obj_set_pos(o, 0, y);
+    lv_obj_set_style_radius(o, 0, 0);
+    lv_obj_set_style_bg_color(o, lv_color_hex(C_BAR), 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(o, 0, 0);
+    lv_obj_set_style_pad_all(o, 0, 0);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    return o;
+}
+
+/* A field behind a run of text: dim grey plate, light glyphs.  Everything in
+ * the info and scale strips uses this so it stays readable at 14 px. */
+static lv_obj_t *field(const lv_font_t *font, int x, int y, int w, bool dim)
+{
+    lv_obj_t *l = lv_label_create(lv_screen_active());
     lv_obj_set_style_text_font(l, font, 0);
-    lv_obj_set_style_text_color(l, color, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(C_TEXT), 0);
+    lv_obj_set_style_bg_color(l, lv_color_hex(dim ? C_FIELD_D : C_FIELD), 0);
+    lv_obj_set_style_bg_opa(l, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(l, 2, 0);
+    lv_obj_set_style_pad_hor(l, 3, 0);
+    lv_obj_set_style_pad_ver(l, 1, 0);
+    if (w > 0) lv_obj_set_width(l, w);
     lv_obj_set_pos(l, x, y);
+    lv_label_set_text(l, "");
     return l;
 }
 
+static lv_obj_t *plain(const lv_font_t *font, lv_color_t color, int x, int y)
+{
+    lv_obj_t *l = lv_label_create(lv_screen_active());
+    lv_obj_set_style_text_font(l, font, 0);
+    lv_obj_set_style_text_color(l, color, 0);
+    lv_obj_set_pos(l, x, y);
+    lv_label_set_text(l, "");
+    return l;
+}
+
+/* Four RSSI bars, right aligned — the handheld's draw_wifi_icon(). */
+static void draw_wifi_bars(lv_obj_t *o, int rssi, bool up)
+{
+    char b[16];
+    if (!up) { snprintf(b, sizeof b, "--"); }
+    else if (rssi > -55) { snprintf(b, sizeof b, "\xE2\x96\x88\xE2\x96\x88\xE2\x96\x88\xE2\x96\x88"); }
+    else if (rssi > -67) { snprintf(b, sizeof b, "\xE2\x96\x88\xE2\x96\x88\xE2\x96\x88"); }
+    else if (rssi > -75) { snprintf(b, sizeof b, "\xE2\x96\x88\xE2\x96\x88"); }
+    else                 { snprintf(b, sizeof b, "\xE2\x96\x88"); }
+    lv_label_set_text(o, b);
+    lv_obj_set_style_text_color(o, up ? lv_color_hex(C_GREEN) : lv_color_hex(C_FAINT), 0);
+}
 
 static void build_screen(void)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_screen_load(scr);
 
-    s_mode = label(scr, &lv_font_montserrat_14, lv_color_hex(0xFFB300), 12, 2);
+    /* ── top chrome: one bar, one colour, plus the accent rule ── */
+    s_bar_top = bar(0, H_HDR);
+    s_mode = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 6, 3);
     lv_label_set_text(s_mode, "---");
+    s_wifi = plain(&lv_font_montserrat_14, lv_color_hex(C_FAINT), SCR_W - 34, 3);
+    s_batt = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 76, 3);
+    s_vfo  = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 150, 3);
+    lv_obj_set_style_text_align(s_vfo, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_width(s_vfo, 70);
+    lv_obj_set_style_bg_color(s_bar_top, lv_color_hex(C_BAR), 0);
+    /* the accent rule is the bar's own bottom border */
+    lv_obj_set_style_border_width(s_bar_top, 1, 0);
+    lv_obj_set_style_border_color(s_bar_top, lv_color_hex(C_ORANGE), 0);
+    lv_obj_set_style_border_side(s_bar_top, LV_BORDER_SIDE_BOTTOM, 0);
 
-    s_batt = label(scr, &lv_font_montserrat_14, lv_color_hex(0x9E9E9E), 166, 2);
-    lv_label_set_text(s_batt, "BAT --");
-
-    s_freq = label(scr, &lv_font_montserrat_28, lv_color_white(), 16, 30);
-    /* 1.5x via transform: the LVGL Kconfig in this build does not expose a
-     * 40 px Montserrat (confgen drops the symbol), and scaling the label keeps
-     * the same glyph shapes anyway.  256 = 1.0x. */
+    /* ── frequency ── */
+    s_freq = plain(&lv_font_montserrat_28, lv_color_hex(C_TEXT), 0, Y_FREQ);
+    lv_obj_align(s_freq, LV_ALIGN_TOP_MID, 0, Y_FREQ);
+    /* Montserrat 40 is not exposed by this build's Kconfig; scaling 28 -> 1.5x
+     * gives the same glyphs at the handheld's numeral height. */
     lv_obj_set_style_transform_scale(s_freq, 384, 0);
-    lv_obj_set_style_transform_pivot_x(s_freq, 0, 0);
+    lv_obj_set_style_transform_pivot_x(s_freq, 50, 0);
     lv_obj_set_style_transform_pivot_y(s_freq, 0, 0);
     lv_label_set_text(s_freq, "---.---");
 
-    s_band = label(scr, &lv_font_montserrat_14, lv_color_hex(0x4FC3F7), 0, 2);
-    lv_obj_align(s_band, LV_ALIGN_TOP_MID, 0, 2);
-    lv_label_set_text(s_band, "----");
-
-    s_sunit = label(scr, &lv_font_montserrat_20, lv_color_hex(0x8BC34A), 12, 86);
-    lv_label_set_text(s_sunit, "S--");
-
-    /* S-meter: 0..255 maps to the bar. */
-    s_sbar = lv_bar_create(scr);
-    lv_obj_set_size(s_sbar, 216, 8);
-    lv_obj_set_pos(s_sbar, 12, 112);
+    /* ── info row: S number + S bar on ONE line, filter, AF/SPK ── */
+    s_sunit = field(&lv_font_montserrat_14, 4, Y_INFO, 52, false);
+    s_sbar  = lv_bar_create(lv_screen_active());
+    lv_obj_set_size(s_sbar, 74, H_INFO - 4);
+    lv_obj_set_pos(s_sbar, 58, Y_INFO + 2);
     lv_bar_set_range(s_sbar, 0, 255);
-    lv_obj_set_style_bg_color(s_sbar, lv_color_hex(0x263238), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_sbar, lv_color_hex(0x66BB6A), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_sbar, lv_color_hex(C_FIELD_D), LV_PART_MAIN);
+    lv_obj_set_style_radius(s_sbar, 2, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_sbar, lv_color_hex(C_ACCENT), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(s_sbar, 2, LV_PART_INDICATOR);
     lv_bar_set_value(s_sbar, 0, LV_ANIM_OFF);
+    s_fil = field(&lv_font_montserrat_14, 136, Y_INFO, 52, true);
+    s_af  = field(&lv_font_montserrat_14, 192, Y_INFO, 44, false);
 
-    s_spec_img = lv_line_create(scr);
-    lv_obj_set_pos(s_spec_img, 0, 124);
-    lv_obj_set_size(s_spec_img, SCOPE_W, SCOPE_H);
-    lv_obj_set_style_line_width(s_spec_img, 2, 0);
-    lv_obj_set_style_line_color(s_spec_img, lv_color_hex(0x3B82F6), 0);
-    lv_obj_set_style_line_rounded(s_spec_img, true, 0);
-    for (int x = 0; x < SCOPE_W; x++) {
-        s_spec_pts[x].x = x;
-        s_spec_pts[x].y = SCOPE_H - 1;
-    }
-    lv_line_set_points(s_spec_img, s_spec_pts, SCOPE_W);
+    /* ── scope caption row ── */
+    s_scope_lbl = plain(&lv_font_montserrat_14, lv_color_hex(C_ACCENT), 4, Y_LBL);
+    lv_label_set_text(s_scope_lbl, "SPECTRUM SCOPE");
+    s_span = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 42, Y_LBL);
+    lv_label_set_text(s_span, "100K");
 
-    /* lv_canvas rather than lv_image: a canvas owns its buffer and LVGL
-     * re-reads it on invalidate, which is the supported path for pixels this
-     * code writes directly. */
-    s_wf_img = lv_canvas_create(scr);
-    lv_canvas_set_buffer(s_wf_img, s_wf_buf, SCOPE_W, WF_H, LV_COLOR_FORMAT_RGB565);
-    lv_obj_set_pos(s_wf_img, 0, 212);
+    /* ── spectrum line ── */
+    s_spec_line = lv_line_create(lv_screen_active());
+    lv_obj_set_pos(s_spec_line, 0, Y_PLOT);
+    lv_obj_set_size(s_spec_line, SCR_W, PLOT_H);
+    lv_obj_set_style_line_width(s_spec_line, 2, 0);
+    lv_obj_set_style_line_color(s_spec_line, lv_color_hex(C_BLUE), 0);
+    lv_obj_set_style_line_rounded(s_spec_line, false, 0);
+    for (int x = 0; x < SCR_W; x++) { s_pts[x].x = x; s_pts[x].y = PLOT_H - 1; }
+    lv_line_set_points(s_spec_line, s_pts, SCR_W);
 
-    s_status = label(scr, &lv_font_montserrat_14, lv_color_hex(0x4FC3F7), 12, 272);
-    lv_label_set_text(s_status, "RX");
-    s_link = label(scr, &lv_font_montserrat_14, lv_color_hex(0x9E9E9E), 168, 272);
-    lv_label_set_text(s_link, "LINK --");
-    /* dim grid so the empty scope does not read as "no data". */
-    heat_init();
-    for (int i = 0; i < SCOPE_W * WF_H; i++) s_wf_buf[i] = 0;
+    /* ── waterfall: lv_canvas owns its buffer and LVGL re-reads it on
+     * invalidate, which is the supported path for pixels written here. ── */
+    s_wf_img = lv_canvas_create(lv_screen_active());
+    lv_canvas_set_buffer(s_wf_img, s_wf_buf, SCR_W, WF_H, LV_COLOR_FORMAT_RGB565);
+    lv_obj_set_pos(s_wf_img, 0, Y_WF);
 
-    s_toast = label(scr, &lv_font_montserrat_14, lv_color_hex(0xEF5350), 12, 294);
+    /* ── scale row: three fields like the handheld ── */
+    s_sc_l = field(&lv_font_montserrat_14, 2, Y_SCALE, 54, true);
+    s_sc_c = field(&lv_font_montserrat_14, 92, Y_SCALE, 56, false);
+    s_sc_r = field(&lv_font_montserrat_14, 184, Y_SCALE, 54, true);
+
+    /* ── bottom chips: mode | RX/TX | link ── */
+    bar(Y_CHIPS, H_CHIPS);
+    s_chip_mode = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 6, Y_CHIPS + 2);
+    lv_label_set_text(s_chip_mode, "FREQ");
+    s_chip_tx = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 0, Y_CHIPS + 2);
+    lv_obj_align(s_chip_tx, LV_ALIGN_TOP_MID, 0, Y_CHIPS + 2);
+    lv_label_set_text(s_chip_tx, "RX");
+    s_chip_link = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 46, Y_CHIPS + 2);
+    lv_label_set_text(s_chip_link, "LINK");
+
+    s_toast = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 0, Y_TOAST);
+    lv_obj_align(s_toast, LV_ALIGN_TOP_MID, 0, Y_TOAST);
+    lv_obj_set_style_bg_color(s_toast, lv_color_hex(C_RED), 0);
+    lv_obj_set_style_bg_opa(s_toast, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_toast, 3, 0);
     lv_label_set_text(s_toast, "");
 
-    lv_screen_load(scr);
+    heat_init();
+    memset(s_wf_buf, 0, sizeof s_wf_buf);
+}
+
+/* Mirrors the handheld's fft_update(): EMA over the peak-downsampled columns. */
+static void fft_update(const uint8_t *cols)
+{
+    for (int x = 0; x < SCR_W; x++) {
+        if (!s_fft_primed) s_fft[x] = (float)cols[x];
+        else s_fft[x] = s_fft[x] * (1.0f - FFT_ALPHA) + (float)cols[x] * FFT_ALPHA;
+    }
+    s_fft_primed = true;
+}
+
+static void update_plot(bool tx)
+{
+    const int range = SCOPE_CEIL - SCOPE_FLOOR;
+    for (int x = 0; x < SCR_W; x++) {
+        float mapped = (s_fft[x] - (float)SCOPE_FLOOR) / (float)range * FFT_BOOST;
+        if (mapped < 0.0f) mapped = 0.0f;
+        if (mapped > 1.0f) mapped = 1.0f;
+        s_pts[x].y = (PLOT_H - 1) - (int)(mapped * (PLOT_H - 1));
+    }
+    lv_obj_set_style_line_color(s_spec_line,
+                                lv_color_hex(tx ? C_RED : C_BLUE), 0);
+    lv_obj_invalidate(s_spec_line);
+}
+
+/* Scroll one row and paint the newest through Jet. */
+static void wf_push(int t_permille)
+{
+    memmove(s_wf_buf, s_wf_buf + SCR_W, sizeof(s_wf_buf) - SCR_W * sizeof(uint16_t));
+    uint16_t *last = s_wf_buf + (WF_H - 1) * SCR_W;
+    for (int x = 0; x < SCR_W; x++) {
+        const int v = s_prev[x] + ((int)s_cur[x] - (int)s_prev[x]) * t_permille / 1000;
+        const int idx = BINS_TO_IDX(v);
+        /* idx 0 is the palette floor, but a cold bin used to be painted pure
+         * black, which reads as "no data"; keep the dark-blue floor visible. */
+        last[x] = s_heat[idx];
+    }
+    lv_obj_invalidate(s_wf_img);
 }
 
 static void refresh(void)
@@ -215,124 +359,117 @@ static void refresh(void)
 
     const bool main_changed = st.seq != s_last_seq;
     const bool meter_changed = st.meter_seq != s_last_meter;
+    const bool tx = st.tx_status > 0;
+    char b[24];
 
     if (main_changed) {
-        char buf[24];
-        format_freq(buf, sizeof buf, st.freq_hz);
-        lv_label_set_text(s_freq, buf);
-
-        snprintf(buf, sizeof buf, "%s %c", st.mode_name[0] ? st.mode_name : "---", st.vfo);
-        lv_label_set_text(s_mode, buf);
-
-        /* UP/DOWN drive either the tuning knob or the speaker; show which. */
-        if (s_ui_mode == UI_MODE_VOL) {
-            snprintf(buf, sizeof buf, "SPK %d%%", s_spk_pct);
-            lv_label_set_text(s_band, buf);
-            lv_obj_set_style_text_color(s_mode, lv_color_hex(0x4FC3F7), 0);
-        } else if (s_ui_mode == UI_MODE_CHANNEL) {
-            extern int g_chan_count;
-            lv_label_set_text(s_band, "CH");
-            lv_obj_set_style_text_color(s_mode, lv_color_hex(0x66BB6A), 0);
-            (void)g_chan_count;
-        } else {
-            lv_label_set_text(s_band, st.band_name[0] ? st.band_name : "----");
-            lv_obj_set_style_text_color(s_mode, lv_color_hex(0xFFB300), 0);
-        }
-        const char *tx = st.tx_status == 1 ? "TX" : (st.tx_status == 2 ? "TUNE" : "RX");
-        snprintf(buf, sizeof buf, "%s%s", tx, st.radio_online ? "" : " ?");
-        lv_label_set_text(s_status, buf);
-        snprintf(buf, sizeof buf, "LINK %s", mrrc_net_up() ? "up" : "--");
-        lv_label_set_text(s_link, buf);
-        lv_obj_set_style_text_color(s_link,
-            mrrc_net_up() ? lv_color_hex(0x66BB6A) : lv_color_hex(0xEF5350), 0);
-        lv_obj_set_style_text_color(s_status,
-                                    st.tx_status == 0 ? lv_color_hex(0x4FC3F7)
-                                                      : lv_color_hex(0xEF5350), 0);
+        format_freq(b, sizeof b, st.freq_hz);
+        lv_label_set_text(s_freq, b);
         lv_obj_set_style_text_color(s_freq,
-                                    st.tx_status == 0 ? lv_color_white()
-                                                      : lv_color_hex(0xEF5350), 0);
+                                    tx ? lv_color_hex(C_RED) : lv_color_hex(C_TEXT), 0);
+
+        /* header: mode left, VFO / battery / wifi right */
+        lv_label_set_text(s_mode, st.mode_name[0] ? st.mode_name : "---");
+        snprintf(b, sizeof b, "VFO %c", st.vfo ? st.vfo : 'A');
+        lv_label_set_text(s_vfo, b);
+        draw_wifi_bars(s_wifi, mrrc_net_rssi(), mrrc_net_up());
+
+        /* chips bar: knob mode | RX or TX seconds | link */
+        const char *m = s_ui_mode == UI_MODE_VOL ? "VOL"
+                      : (s_ui_mode == UI_MODE_CHANNEL ? "CH" : "FREQ");
+        lv_label_set_text(s_chip_mode, m);
+        if (tx) {
+            snprintf(b, sizeof b, "TX%s", st.tx_status == 2 ? "T" : "");
+            lv_label_set_text(s_chip_tx, b);
+            lv_obj_set_style_text_color(s_chip_tx, lv_color_hex(C_RED), 0);
+        } else {
+            lv_label_set_text(s_chip_tx, "RX");
+            lv_obj_set_style_text_color(s_chip_tx, lv_color_hex(C_TEXT), 0);
+        }
+        lv_label_set_text(s_chip_link, mrrc_net_up() ? "LINK" : "noSRV");
+        lv_obj_set_style_text_color(s_chip_link,
+                                    lv_color_hex(mrrc_net_up() ? C_TEXT : C_RED), 0);
+
+        /* filter + AF live in the info row; SPK replaces AF in VOL mode */
+        if (st.filter_hz > 0) {
+            snprintf(b, sizeof b, "FIL %d.%dK", st.filter_hz / 1000,
+                     (st.filter_hz % 1000) / 100);
+            lv_label_set_text(s_fil, b);
+        } else {
+            lv_label_set_text(s_fil, "");
+        }
+        if (s_ui_mode == UI_MODE_VOL) {
+            snprintf(b, sizeof b, "SPK %d%%", s_spk_pct);
+            lv_label_set_text(s_af, b);
+            lv_obj_set_style_bg_color(s_af, lv_color_hex(C_FIELD), 0);
+        } else if (s_ui_mode == UI_MODE_CHANNEL) {
+            lv_label_set_text(s_af, s_chan_lbl);
+            lv_obj_set_style_bg_color(s_af, lv_color_hex(C_FIELD), 0);
+        } else {
+            snprintf(b, sizeof b, "AF %d", st.af_gain);
+            lv_label_set_text(s_af, b);
+            lv_obj_set_style_bg_color(s_af, lv_color_hex(C_FIELD_D), 0);
+        }
+
+        /* scale row around the VFO */
+        const int32_t half = k_span_hz / 2;
+        format_mhz(b, sizeof b, st.freq_hz - half);  lv_label_set_text(s_sc_l, b);
+        format_mhz(b, sizeof b, st.freq_hz);         lv_label_set_text(s_sc_c, b);
+        format_mhz(b, sizeof b, st.freq_hz + half);  lv_label_set_text(s_sc_r, b);
+
         s_last_seq = st.seq;
     }
 
     if (meter_changed || main_changed) {
-        char buf[20];
+        /* S number and bar share the row: number is the server's s_unit
+         * ("9", "+10", "5"), bar is the raw 0..255 level. */
+        if (st.s_unit[0] == '+') snprintf(b, sizeof b, "S9%s", st.s_unit);
+        else snprintf(b, sizeof b, "%s", st.s_unit[0] ? st.s_unit : "-");
+        lv_label_set_text(s_sunit, b);
         lv_bar_set_value(s_sbar, st.s_meter, LV_ANIM_OFF);
-        snprintf(buf, sizeof buf, "%s", st.s_unit[0] ? st.s_unit : "S--");
-        lv_label_set_text(s_sunit, buf);
         s_last_meter = st.meter_seq;
     }
 
     if (s_bins_new) {
         s_bins_new = false;
-        /* Downsample 850 bins to 240 columns by peak, which keeps narrow
-         * signals visible instead of averaging them away. */
-        for (int x = 0; x < SCOPE_W; x++) {
-            const int lo = (int)((long)x * BINS / SCOPE_W);
-            int hi = (int)((long)(x + 1) * BINS / SCOPE_W);
+        /* Peak downsample 850 -> 240: averaging hides narrow signals. */
+        for (int x = 0; x < SCR_W; x++) {
+            const int lo = (int)((long)x * BINS / SCR_W);
+            int hi = (int)((long)(x + 1) * BINS / SCR_W);
             if (hi <= lo) hi = lo + 1;
             uint8_t peak = 0;
             for (int i = lo; i < hi && i < BINS; i++)
                 if (s_bins[i] > peak) peak = s_bins[i];
-            s_scope_cols[x] = peak;
+            s_cols[x] = peak;
         }
-        if (s_wf_started) memcpy(s_prev_cols, s_cur_cols, SCOPE_W);
-        else { memcpy(s_prev_cols, s_scope_cols, SCOPE_W); s_wf_started = true; }
-        memcpy(s_cur_cols, s_scope_cols, SCOPE_W);
-        s_wf_t = 0;
-
-        /* waterfall: shift up one row, push the newest through the Jet scale */
-        memmove(s_wf_buf, s_wf_buf + SCOPE_W,
-                sizeof(s_wf_buf) - SCOPE_W * sizeof(uint16_t));
-        if (s_spec_img) lv_obj_invalidate(s_spec_img);
+        if (s_started) memcpy(s_prev, s_cur, SCR_W);
+        else { memcpy(s_prev, s_cols, SCR_W); s_started = true; }
+        memcpy(s_cur, s_cols, SCR_W);
+        s_t = 0;
+        fft_update(s_cols);
     }
 
-    /* Spectrum and waterfall both advance on this tick.  Frames land at
-     * ~5.3 Hz; interpolating from the previous sweep to the current one makes
-     * the trace move smoothly instead of snapping 5 times a second. */
-    if (s_wf_started) {
-        for (int x = 0; x < SCOPE_W; x++) {
-            const int v = s_prev_cols[x] +
-                          ((int)s_cur_cols[x] - (int)s_prev_cols[x]) * (int)s_wf_t / 1000;
-            const int n = BINS_TO_IDX(v) * 255 / 63;
-            s_spec_pts[x].y = (SCOPE_H - 1) - (n * (SCOPE_H - 1)) / 255;
-        }
-        /* Only invalidate: the point array is already registered with the
-         * object and is read at draw time.  Calling lv_line_set_points() every
-         * tick recomputes the line's bounding box and, at this rate, starves
-         * the idle task (task watchdog). */
-        if (s_spec_img) lv_obj_invalidate(s_spec_img);
-        s_wf_t += (uint32_t)(REFRESH_MS * 1000u) * 1000u / 189000u;   /* ~5.3 Hz */
-        if (s_wf_t > 1000) s_wf_t = 1000;
-        /* Two rows per tick: at 5 ticks/s that is 10 rows/s, so the 54-row
-         * history scrolls in ~5 s.  One row per tick looked frozen. */
+    if (s_started) {
+        update_plot(tx);
+        /* Two rows per tick at 5 ticks/s = 10 rows/s, so the WF_H-row history
+         * scrolls in about six seconds.  One row per tick looked frozen. */
         for (int r = 0; r < 2; r++) {
-            memmove(s_wf_buf, s_wf_buf + SCOPE_W,
-                    sizeof(s_wf_buf) - SCOPE_W * sizeof(uint16_t));
-            uint16_t *last = s_wf_buf + (WF_H - 1) * SCOPE_W;
-            const int t = ((int)s_wf_t * (r + 1)) / 2;
-            for (int x = 0; x < SCOPE_W; x++) {
-                const int v = s_prev_cols[x] +
-                              ((int)s_cur_cols[x] - (int)s_prev_cols[x]) * t / 1000;
-                const int idx = BINS_TO_IDX(v);
-                last[x] = (idx > 0) ? s_heat[idx] : 0x0000;
-            }
+            const int t = (int)s_t + (r * (1000 - (int)s_t)) / 2;
+            wf_push(t);
         }
-        if (s_wf_img) lv_obj_invalidate(s_wf_img);
+        s_t += (uint32_t)(REFRESH_MS * 1000u) * 1000u / 189000u;   /* ~5.3 Hz */
+        if (s_t > 1000) s_t = 1000;
     }
 
     if (s_batt_pct >= 0) {
-        char buf[16];
-        snprintf(buf, sizeof buf, "BAT %d%%", s_batt_pct);
-        lv_label_set_text(s_batt, buf);
+        snprintf(b, sizeof b, "%d%%", s_batt_pct);
+        lv_label_set_text(s_batt, b);
+        lv_obj_set_style_text_color(s_batt,
+            lv_color_hex(s_batt_charging ? C_GREEN : C_TEXT), 0);
     }
 }
 
-static void ui_timer_cb(lv_timer_t *t)
-{
-    (void)t;
-    refresh();
-}
-
+static void ui_timer_cb(lv_timer_t *t) { (void)t; refresh(); }
 
 void mrrc_ui_start(void)
 {
@@ -340,8 +477,8 @@ void mrrc_ui_start(void)
     build_screen();
     bsp_lvgl_unlock();
     /* Runs inside the LVGL task, in step with the renderer.  A separate
-     * low-priority task lost the CPU to audio/Wi-Fi and made the scope visibly
-     * stutter once per second. */
+     * low-priority task lost the CPU to audio/Wi-Fi and made the scope stutter
+     * once per second. */
     lv_timer_create(ui_timer_cb, REFRESH_MS, NULL);
 }
 
@@ -358,20 +495,27 @@ void mrrc_ui_set_mode(ui_mode_t mode, int volume_pct)
     s_ui_mode = mode;
     s_spk_pct = volume_pct;
     if (!bsp_lvgl_lock(100)) return;
-    /* Force the main-field branch on the next refresh. */
+    s_last_seq = 0xFFFFFFFF;      /* force the field branch next refresh */
+    bsp_lvgl_unlock();
+}
+
+void mrrc_ui_set_channel(const char *label)
+{
+    snprintf(s_chan_lbl, sizeof s_chan_lbl, "%s", label ? label : "");
+    if (!bsp_lvgl_lock(100)) return;
     s_last_seq = 0xFFFFFFFF;
     bsp_lvgl_unlock();
 }
 
 void mrrc_ui_set_battery(int percent, bool charging)
 {
-    (void)charging;
     s_batt_pct = percent;
+    s_batt_charging = charging;
 }
 
 void mrrc_ui_set_toast(const char *text)
 {
     if (!bsp_lvgl_lock(100)) return;
-    lv_label_set_text(s_toast, text);
+    lv_label_set_text(s_toast, text ? text : "");
     bsp_lvgl_unlock();
 }

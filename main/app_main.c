@@ -88,6 +88,7 @@ static void knob_step(bsp_btn_t btn)
         if (g_chan_count <= 0) { mrrc_ui_set_toast("no channels"); return; }
         s_chan_idx = (s_chan_idx + dir + g_chan_count) % g_chan_count;
         mrrc_net_set_chan(s_chan_idx);
+        mrrc_ui_set_channel(g_chans[s_chan_idx].label);
         mrrc_ui_set_toast(g_chans[s_chan_idx].label);
         return;
     }
@@ -150,7 +151,6 @@ static void keys_task(void *arg)
      * of 600 ms of latency on the double tap. */
     int tap_count = 0;
     int64_t tap_deadline = 0;
-    int chan_idx = 0;
     bsp_btn_t repeat_btn = BSP_BTN_UP;
     int64_t repeat_at = 0;
 

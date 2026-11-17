@@ -592,3 +592,10 @@ void mrrc_net_start(void)
 }
 
 bool mrrc_net_up(void) { return s_ctrl_up; }
+
+int mrrc_net_rssi(void)
+{
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) return ap.rssi;
+    return 0;
+}

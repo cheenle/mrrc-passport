@@ -18,6 +18,9 @@ void mrrc_ui_set_mode(ui_mode_t mode, int volume_pct);
  * task, so it must not touch LVGL directly — it only publishes the data. */
 void mrrc_ui_spectrum(const uint8_t *bins, size_t n);
 
+/* Channel name shown in the info row while the knob is in CHANNEL mode. */
+void mrrc_ui_set_channel(const char *label);
+
 /* Local status the UI shows but the server knows nothing about. */
 void mrrc_ui_set_battery(int percent, bool charging);
 void mrrc_ui_set_toast(const char *text);

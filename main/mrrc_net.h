@@ -49,6 +49,8 @@ void mrrc_state_unlock(void);
 
 void mrrc_net_start(void);
 bool mrrc_net_up(void);
+/* Current AP signal in dBm, or 0 when there is no station connection. */
+int mrrc_net_rssi(void);
 
 /* Control writes (server-side: {"type":"set","field":...,"value":...}). */
 void mrrc_net_set_freq(int32_t hz);
