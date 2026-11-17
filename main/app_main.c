@@ -184,6 +184,15 @@ static void keys_task(void *arg)
 
         /* ── PTT ─────────────────────────────────────────────────────── */
         if (e.ev == BSP_BTN_LONG && e.btn == BSP_BTN_OK && !ptt_on) {
+            /* A second tap of a double tap lasts well over the 350 ms long-press
+             * threshold, so it used to key the radio mid-sequence.  If the
+             * previous tap was recent this press belongs to a tap sequence, not
+             * to PTT: drop it here and let the release path count it. */
+            if (tap_deadline && esp_timer_get_time() < tap_deadline) {
+                /* Not a transmission: the release path counts this as a tap,
+                 * because ptt_on is still false. */
+                continue;
+            }
             ptt_on = true;
             /* Single /WSterminal socket: the uplink is permanently connected,
              * so the old "open /WSaudioTX before ptt:true" ordering (needed for

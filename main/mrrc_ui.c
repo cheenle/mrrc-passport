@@ -70,18 +70,20 @@
 #define SCR_H       320
 #define H_HDR       26          /* chrome bar height; its text sits inside it */
 #define Y_FREQ      46          /* below the accent rule, clear of the bar */
-#define Y_INFO      88          /* row 1: band | FIL | AF | SPAN */
+#define Y_INFO     102          /* row 1: band | FL | AF | SPAN — two blank lines
+                                 * under the frequency, which also pulls the
+                                 * bottom of the layout up */
 #define H_INFO      17
-#define Y_SMET      107         /* row 2: the S-meter, on its own line */
+#define Y_SMET      121         /* row 2: the S-meter, on its own line */
 #define H_SMET      18
-#define Y_PLOT      136         /* pushed down: the gap above it read as dead space */
-#define PLOT_H      62
-#define Y_WF        202
+#define Y_PLOT      146
+#define PLOT_H      56
+#define Y_WF        206
 #define WF_H        30                  /* RGB565: 240*30*2 = 14.4 KB */
-#define Y_SCALE     236
-#define Y_CHIPS     292
+#define Y_SCALE     240
+#define Y_CHIPS     296
 #define H_CHIPS     22
-#define Y_TOAST     296
+#define Y_TOAST     298   /* overlays the chips bar; no plate, so it is just text */
 
 #define BINS        850
 
@@ -378,11 +380,13 @@ static void build_screen(void)
     s_chip_link = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 46, Y_CHIPS + 2);
     lv_label_set_text(s_chip_link, "LINK");
 
-    s_toast = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 0, Y_TOAST);
+    /* No background plate: a red block for every mode announcement was louder
+     * than the message.  The toast is plain text; red is reserved for the TX
+     * indication, which is the one place colour carries a warning. */
+    s_toast = plain(&lv_font_montserrat_14, lv_color_hex(C_ACCENT), 0, Y_TOAST);
     lv_obj_align(s_toast, LV_ALIGN_TOP_MID, 0, Y_TOAST);
-    lv_obj_set_style_bg_color(s_toast, lv_color_hex(C_RED), 0);
-    lv_obj_set_style_bg_opa(s_toast, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_all(s_toast, 3, 0);
+    lv_obj_set_style_bg_opa(s_toast, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(s_toast, 0, 0);
     lv_label_set_text(s_toast, "");
     lv_obj_add_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
 
