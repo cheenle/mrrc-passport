@@ -81,7 +81,22 @@ typedef struct {
     uint16_t delay_ms;
 } st_init_cmd_t;
 
+/* RAMCTRL (0xB0): panel-side byte order for 16-bit pixels.
+ *
+ * LVGL writes RGB565 little-endian, and the fixed driver default here is
+ * big-endian, so the port compensated by swapping every pixel in software
+ * (lv_draw_sw_rgb565_swap) on each flush — 20400 swaps per refresh, ~67k/s.
+ * Telling the panel to read little-endian removes that loop entirely.
+ *
+ * 0xF8 = little-endian (the handheld's board_display.c measured this on the
+ * same ST7789 family).  If colours come out byte-swapped after this, the panel
+ * wants 0xF0 and swap_bytes must stay on. */
+#define BSP_LCD_RAMCTRL_LE 1
+
 static const st_init_cmd_t ST7789P3_CMDS[] = {
+#if BSP_LCD_RAMCTRL_LE
+    {0xB0, {0x00, 0xF8}, 2, 0},                      // RAMCTRL 小端
+#endif
     {0xB2, {0x05, 0x05, 0x00, 0x33, 0x33}, 5, 0},   // PORCTRL 帧率 porch
     {0xB7, {0x35}, 1, 0},                            // GCTRL 栅极
     {0xBB, {0x21}, 1, 0},                            // VCOMS

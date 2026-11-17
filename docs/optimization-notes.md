@@ -152,14 +152,41 @@ audio          <1%
   把 `Y_WF` 从 192 改到 196（留 5 行黑隙）后，`taskLVGL` 44% → 35%，
   但这是 8 个百分点的变化，不是决定性因素。
 
-### 3.4 剩余的可疑项（尚未验证）
+### 3.4 绘制缓冲行数 —— 收益最大的一处
 
-| 项 | 说明 |
+**Espressif 官方性能指南给了明确阈值**（`esp_lvgl_port/docs/performance.md`）：
+
+> - Frame buffer size >25% of the screen does not bring relevant performance boost
+> - Frame buffer size <10% will have **severe negative effect** on performance
+
+240×320 = 76800 px 换算：10% = 7680 px = **32 行**。
+
+我们长期跑在 3.8%–5.6%，正好落在官方说的"严重影响"区间 ——
+**这就是 taskLVGL 吃掉一半 CPU 的真正原因。**
+
+| 缓冲行数 | 占屏比 | taskLVGL | largest |
+|---|---|---|---|
+| 8 行 | 3.8% | 58-60% | 46K |
+| 12 行 | 5.6% | 43-49% | 44K |
+| **32 行 + FAST_MEM_IRAM** | **10.0%** | **20-26%** | 24K |
+
+配套启用 `CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y`（官方单列的加速项：
+把最热的 LVGL 函数放进 IRAM，免去 flash cache 等待）。
+
+⚠️ **代价要盯紧**：`largest` 从 38K 降到 24K，启动期最低水位 `min=9K`。
+PTT 的 TLS 握手需要约 16 KB 连续空间 —— 24K 够用但余量不大。
+如果发射失败，先把缓冲退到 24 行（7.5%）。
+
+### 3.4b 已排除的配置项
+
+| 项 | 结论 |
 |---|---|
-| `double_buffer = false` + 8 行绘制缓冲 | 瀑布 40 行要 **5 轮**「渲染→等 SPI→渲染」，渲染与传输完全串行。这是最可能的固定开销来源。 |
-| `LV_DRAW_SW_ASM_NONE = y` | 软件渲染器禁用全部汇编优化，纯 C 路径 |
-| `swap_bytes = true` | 每像素一次高低字节交换，20400 px/帧 → 2 万次/帧 |
-| 12 种像素格式全开 | 只用 RGB565，其余 11 种是死代码；每条绘制路径都要做格式判断 |
+| 12 种像素格式全开 | **已处理**：只留 RGB565，bin 小 114 KB。CPU 无变化（不在热路径） |
+| `LV_DRAW_SW_ASM_NONE` | **无法改**：四选一，替代项需 NEON / Helium / RISC-V **Vector**。ESP32-C3 是 RV32IMC，没有 V 扩展 |
+| `swap_bytes = true` | **已改为关闭**：面板侧用 RAMCTRL(0xB0) 配小端。实测 CPU 无变化 —— `lv_draw_sw_rgb565_swap` 本就不是瓶颈，省掉的只是每帧 2 万次遍历 |
+| `LV_USE_FLEX` / `GRID` | **不能关**：`lv_list`、`lv_menu`、`lv_calendar` 甚至 LVGL 自带示例都依赖 |
+| `double_buffer` | **开不了**：两倍缓冲 = 30 KB 连续内存，与 PTT 的 TLS 抢空间 |
+| CPU 240 MHz | 不适用：C3 最高 160 MHz |
 
 ### 3.5 改动绘制缓冲行数要小心
 

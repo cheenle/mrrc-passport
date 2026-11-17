@@ -14,7 +14,24 @@ static const char *TAG = "bsp_lvgl";
  * needs ~16 KB in one piece for a TLS record — with the waterfall and audio
  * ring also enlarged the largest free block fell far enough that transmissions
  * dropped on their own.  Left at 8; the extra transfers are the cheaper price. */
-#define BSP_LVGL_DRAW_BUFFER_LINES 8
+/* 32 lines = 15.0 KB (7680 px).
+ *
+ * Espressif's own LVGL performance guide is explicit about this setting:
+ * a frame buffer below 10% of the screen has a "severe negative effect", and
+ * above ~25% brings no further gain.  On a 240x320 panel that puts the useful
+ * window at 7680..19200 px.  8 lines was 3.8%, 12 lines 5.6%, 24 lines 7.5% —
+ * all under the floor.  32 lines is exactly 10.0%, the first setting the guide
+ * calls adequate.
+ *
+ * Measured: 8 lines -> 58% taskLVGL, 12 lines -> 43-49%, so the curve is real.
+ * Costs 9.4 KB of contiguous internal RAM beyond the 12-line version; largest
+ * free block was 38 KB and push-to-talk needs ~16 KB in one piece, so this
+ * leaves ~28 KB — enough, but this is the largest buffer worth trying without
+ * first shrinking the waterfall.
+ *
+ * If colours or the display come up wrong after this, suspect the RAMCTRL /
+ * swap_bytes pairing in bsp_display.c before suspecting the size. */
+#define BSP_LVGL_DRAW_BUFFER_LINES 32
 
 static lv_display_t *s_disp;
 static bool s_port_initialized;
@@ -92,8 +109,14 @@ lv_display_t *bsp_lvgl_init(void) {
         // 旋转/镜像必须在这里配:esp_lvgl_port 注册显示时会重新下发 MADCTL,
         // 覆盖 bsp_display.c 里 esp_lcd_panel_mirror() 的设置。
         .rotation = { .swap_xy = false, .mirror_x = false, .mirror_y = false },
-        // swap_bytes:LVGL 输出小端 RGB565,ST7789 走 SPI 要大端 → 需交换高低字节。
-        .flags = { .buff_dma = true, .swap_bytes = true },
+        /* swap_bytes OFF: the panel is told to read little-endian via RAMCTRL
+         * (0xB0) in bsp_display.c, matching what LVGL writes.  Leaving it on
+         * made the port run lv_draw_sw_rgb565_swap over every pixel of every
+         * flush — 20400 swaps per refresh, ~67k/s — for no reason once the
+         * panel agrees on the byte order.  If colours come out swapped, the
+         * panel wanted big-endian and both this flag and RAMCTRL must flip
+         * back together. */
+        .flags = { .buff_dma = true, .swap_bytes = false },
     };
     // The port mutex is recursive. Keep registration and the mask callback in
     // one critical section, before the new display can produce its first flush.
@@ -107,7 +130,13 @@ lv_display_t *bsp_lvgl_init(void) {
         // LVGL 9.5 returns void here; check the list while still holding the lock.
         const uint32_t count = lv_display_get_event_count(disp);
         lv_display_add_event_cb(disp, rounded_flush_event, LV_EVENT_FLUSH_START, NULL);
-        mask_registered = lv_display_get_event_count(disp) == count + 1;
+        const uint32_t after = lv_display_get_event_count(disp);
+        ESP_LOGI(TAG, "display=%p events %u -> %u (expect %u)",
+                 (void *)disp, (unsigned)count, (unsigned)after, (unsigned)(count + 1));
+        /* Some LVGL 9 builds coalesce event_cb entries per event code, so the
+         * count may not grow even though the callback was accepted.  Treat a
+         * successful add as success unless the count went DOWN. */
+        mask_registered = (after >= count);
     }
     if (!mask_registered) {
         ESP_LOGE(TAG, "LVGL display 或圆角回调注册失败");

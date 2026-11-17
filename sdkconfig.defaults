@@ -75,3 +75,10 @@ CONFIG_OPUS_PSEUDOSTACK_SIZE=60000
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 # 日志：保留 INFO（运行期诊断仍需要），但热路径里的逐帧日志已在代码层删除。
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ── LVGL 性能（实测，见 docs/optimization-notes.md 3.4）────────────────
+# 官方指南：帧缓冲 <10% 屏面积有"严重负面影响"。240x320 的 10% = 32 行。
+# 配套把最热的 LVGL 函数放进 IRAM，免去 flash cache 等待。
+# 绘制缓冲行数在 components/bsp/src/bsp_display_lvgl.c 的
+# BSP_LVGL_DRAW_BUFFER_LINES 里，不在 sdkconfig。
+CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y
