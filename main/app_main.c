@@ -147,9 +147,9 @@ static void keys_task(void *arg)
     (void)arg;
     key_ev_t e;
     bool ptt_on = false;
-    /* Auto-repeat: hold UP/DOWN to sweep.  350 ms before the first repeat, then
-     * one step every 90 ms — the handset's 450/120 felt sticky when sweeper
-     * tuning, and the ADC key itself resolves a fresh press within ~20 ms. */
+    /* Auto-repeat: the first step lands on the press itself (see below), the
+     * next after 350 ms, then one every 90 ms.  The handset's 450/120 felt
+     * sticky when sweeper tuning. */
     bool repeat = false;
     /* iot_button's BUTTON_DOUBLE_CLICK never fires on this board: the BSP key
      * lock reports the release 120 ms late, so the second tap lands inside the
@@ -256,21 +256,27 @@ static void keys_task(void *arg)
             continue;
         }
 
-        /* ── knob ────────────────────────────────────────────────────── */
+        /* ── knob ──────────────────────────────────────────────────────
+         * Driven by PRESS, not CLICK.  The button component only emits CLICK
+         * when the measured hold exceeds short_press_time (180 ms) and silently
+         * drops anything shorter, and this board's ADC decoder plus the BSP key
+         * lock make short taps fall into that hole — that is why UP/DOWN
+         * sometimes did nothing at all.  PRESS is emitted on every press with no
+         * such precondition and no latency, so the step happens immediately and
+         * auto-repeat is timed from there.
+         */
         if (e.btn == BSP_BTN_UP || e.btn == BSP_BTN_DOWN) {
-            if (e.ev == BSP_BTN_RELEASE) {
+            if (e.ev == BSP_BTN_PRESS) {
+                knob_step(e.btn);
+                if (s_ui_mode == UI_MODE_VOL) vol_store();
+                repeat = true;
+                repeat_btn = e.btn;
+                repeat_at = esp_timer_get_time() + 350000;   /* then repeat */
+            } else if (e.ev == BSP_BTN_RELEASE) {
                 if (repeat) {
                     repeat = false;
                     if (s_ui_mode == UI_MODE_VOL) vol_store();
                 }
-            } else if (e.ev == BSP_BTN_CLICK) {
-                knob_step(e.btn);
-                if (s_ui_mode == UI_MODE_VOL) vol_store();
-            } else if (e.ev == BSP_BTN_LONG) {
-                knob_step(e.btn);
-                repeat = true;
-                repeat_btn = e.btn;
-                repeat_at = esp_timer_get_time() + 90000;
             }
             continue;
         }

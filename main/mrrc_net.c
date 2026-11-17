@@ -156,11 +156,13 @@ static void handle_ctrl_text(const char *payload, int len)
         const cJSON *chans = cJSON_GetObjectItem(root, "memChannels");
         if (cJSON_IsArray(chans)) {
             g_chan_count = 0;
+            int slots = 0;
             for (const cJSON *it = chans->child;
                  it && g_chan_count < MRRC_MAX_CH; it = it->next) {
                 const cJSON *f = cJSON_GetObjectItem(it, "freq");
                 const cJSON *m = cJSON_GetObjectItem(it, "mode");
                 const cJSON *l = cJSON_GetObjectItem(it, "label");
+                slots++;
                 if (!cJSON_IsNumber(f)) continue;
                 mrrc_chan_t *c = &g_chans[g_chan_count++];
                 c->freq_hz = (int32_t)f->valuedouble;
@@ -169,6 +171,9 @@ static void handle_ctrl_text(const char *payload, int len)
                 snprintf(c->label, sizeof c->label, "%s",
                          cJSON_IsString(l) ? l->valuestring : "");
             }
+            ESP_LOGI(TAG, "memChannels: %d slots, %d usable", slots, g_chan_count);
+        } else {
+            ESP_LOGW(TAG, "fullState without memChannels array");
         }
         bump |= 1;
     } else if (!strcmp(t, "stateUpdate")) {
