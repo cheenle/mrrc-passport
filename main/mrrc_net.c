@@ -141,6 +141,28 @@ static int apply_field(const char *k, cJSON *v)
         st->af_gain = (int)v->valuedouble;
         return 2;
     }
+    /* TX meters.  The server nests them ("power_meter": {"power_watts": n}),
+     * so these arrive both as flat keys from stateUpdate and as nested objects
+     * inside fullState — handled by apply_object() below and by the explicit
+     * meter pulls here. */
+    if (!strcmp(k, "power_watts") && cJSON_IsNumber(v)) {
+        st->power_w = (float)v->valuedouble;
+        return 2;
+    }
+    if (!strcmp(k, "swr_ratio") && cJSON_IsNumber(v)) {
+        st->swr = (float)v->valuedouble;
+        return 2;
+    }
+    if (!strcmp(k, "power_meter") && cJSON_IsObject(v)) {
+        const cJSON *w = cJSON_GetObjectItem(v, "power_watts");
+        if (cJSON_IsNumber(w)) { st->power_w = (float)w->valuedouble; return 2; }
+        return 0;
+    }
+    if (!strcmp(k, "swr_meter") && cJSON_IsObject(v)) {
+        const cJSON *r = cJSON_GetObjectItem(v, "swr_ratio");
+        if (cJSON_IsNumber(r)) { st->swr = (float)r->valuedouble; return 2; }
+        return 0;
+    }
     return 0;
 }
 
@@ -710,6 +732,8 @@ void mrrc_net_start(void)
     if (!s_lock) s_lock = xSemaphoreCreateMutex();
     memset(&g_radio, 0, sizeof g_radio);
     g_radio.vfo = 'A';
+    g_radio.power_w = -1.0f;   /* -1 = not reported */
+    g_radio.swr = 0.0f;
     if (!s_lock) {
         ESP_LOGE(TAG, "no mutex");
         return;

@@ -44,3 +44,12 @@ esp_err_t bsp_audio_read(void *pcm, size_t bytes);
 
 // 输出音量 0..100(%)。
 void bsp_audio_set_volume(uint8_t percent);
+
+/* Microphone PGA gain in dB, applied to the ES8311 input.
+ *
+ * Range is 0..42 dB — the ES8311's hardware maximum, in 6 dB steps.  There is
+ * no 48 dB setting in the chip.  The default is 18 dB; raise it only as far as
+ * the far end still reports clean audio, because a clipped uplink splatters
+ * across the SSB passband.  Returns the value actually applied. */
+int  bsp_audio_set_mic_gain_db(int db);
+int  bsp_audio_get_mic_gain_db(void);

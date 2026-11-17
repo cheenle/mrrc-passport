@@ -65,6 +65,15 @@ static void vol_load(void)
     if (v < 0) v = 0;
     if (v > 100) v = 100;
     s_spk_vol = (int)v;
+
+    /* Microphone PGA survives a reboot too: an operator who raised it to be
+     * heard on a weak signal should not have to rediscover the setting. */
+    int32_t g = bsp_audio_get_mic_gain_db();
+    if (nvs_open("mrrc", NVS_READONLY, &h) == ESP_OK) {
+        (void)nvs_get_i32(h, "mic_gain", &g);
+        nvs_close(h);
+    }
+    bsp_audio_set_mic_gain_db((int)g);
 }
 
 static void vol_store(void)
@@ -72,6 +81,7 @@ static void vol_store(void)
     nvs_handle_t h;
     if (nvs_open("mrrc", NVS_READWRITE, &h) != ESP_OK) return;
     (void)nvs_set_i32(h, "spk_vol", s_spk_vol);
+    (void)nvs_set_i32(h, "mic_gain", bsp_audio_get_mic_gain_db());
     (void)nvs_commit(h);
     nvs_close(h);
 }
@@ -90,6 +100,16 @@ static void knob_step(bsp_btn_t btn)
         mrrc_net_set_chan(s_chan_idx);
         mrrc_ui_set_channel(g_chans[s_chan_idx].label);
         mrrc_ui_set_toast(g_chans[s_chan_idx].label);
+        return;
+    }
+
+    if (s_ui_mode == UI_MODE_MIC) {
+        /* The ES8311 input PGA only has 0/6/12/18/24/30 dB steps, so the knob
+         * moves one step at a time.  Asking for +1 dB used to land on the same
+         * register value and nothing audibly changed. */
+        const int g = bsp_audio_set_mic_gain_db(bsp_audio_get_mic_gain_db() + dir * 6);
+        mrrc_ui_set_mode(s_ui_mode, g);
+        ESP_LOGI(TAG, "mic gain -> %d dB", g);
         return;
     }
 
@@ -307,10 +327,18 @@ static void keys_task(void *arg)
 
                 if (tap_count == 2) {
                     /* Act now — no waiting for the window to close. */
-                    s_ui_mode = (ui_mode_t)((s_ui_mode + 1) % 3);
-                    mrrc_ui_set_mode(s_ui_mode, s_spk_vol);
+                    s_ui_mode = (ui_mode_t)((s_ui_mode + 1) % UI_MODE_COUNT);
+                    /* Pass the value that belongs to the NEW mode: speaker
+                     * percent for VOL, microphone dB for MIC.  Always handing
+                     * over s_spk_vol made MIC display "60dB". */
+                    const int mv = (s_ui_mode == UI_MODE_MIC)
+                                 ? bsp_audio_get_mic_gain_db()
+                                 : s_spk_vol;
+                    mrrc_ui_set_mode(s_ui_mode, mv);
                     const char *nm = s_ui_mode == UI_MODE_CHANNEL ? "CH"
-                                   : (s_ui_mode == UI_MODE_VOL ? "VOL" : "FREQ");
+                                   : s_ui_mode == UI_MODE_VOL   ? "VOL"
+                                   : s_ui_mode == UI_MODE_MIC   ? "MIC"
+                                                                : "FREQ";
                     mrrc_ui_set_toast(nm);
                     ESP_LOGI(TAG, "mode -> %s", nm);
                 } else if (tap_count >= 3) {          /* third tap: cycle mode too */

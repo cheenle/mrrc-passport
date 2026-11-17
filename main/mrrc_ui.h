@@ -11,7 +11,19 @@ void mrrc_ui_start(void);
 
 /* Which knob the UP/DOWN keys drive.  The badge in the top bar is the only
  * place this is visible, so it has to be obvious at a glance. */
-typedef enum { UI_MODE_FREQ = 0, UI_MODE_CHANNEL = 1, UI_MODE_VOL = 2 } ui_mode_t;
+/* Knob targets.  Moved by OK double-tap; the same key cycles them.
+ *
+ * UI_MODE_MIC adjusts the ES8311 input PGA (0..24 dB).  It is separate from
+ * UI_MODE_VOL because the two halves of the link need different amounts of
+ * help: the speaker is usually fine at the default, while a quiet microphone
+ * is exactly what makes a transmission sound weak on the far end. */
+typedef enum {
+    UI_MODE_FREQ = 0,
+    UI_MODE_CHANNEL = 1,
+    UI_MODE_VOL = 2,
+    UI_MODE_MIC = 3,
+    UI_MODE_COUNT = 4
+} ui_mode_t;
 void mrrc_ui_set_mode(ui_mode_t mode, int volume_pct);
 
 /* 850 raw bins, one per column after downsampling.  Called from the WebSocket

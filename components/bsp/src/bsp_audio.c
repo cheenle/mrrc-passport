@@ -30,6 +30,9 @@ static bool     s_initialized;
 static esp_err_t s_sleep_result;
 static bool     s_codec_release_failed;
 static uint8_t  s_volume;
+/* ES8311 input PGA, dB.  The range and its ceiling are explained in
+ * bsp_audio_set_mic_gain_db() — above ~18 dB normal speech clips the ADC. */
+static int      s_mic_gain_db = 18;
 static int      s_io_error;
 
 // esp_codec_dev 1.6.2 discards some control/data interface errors. Remember the
@@ -465,8 +468,9 @@ esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch) {
     //   驱动已按采样率与 MCLK 精确算好,覆写会导致 ADC/DAC 时序错乱、录音回放全是杂音。
     //   这里只设麦克风模拟 PGA 增益。
     r = /* 30 dB clipped the ADC on this board (peak hit 32768 with normal
-     * speech at 10 cm); 18 dB leaves headroom for the MRRC uplink. */
-    esp_codec_dev_set_in_gain(s_dev, 18.0f);
+     * speech at 10 cm); 18 dB leaves headroom for the MRRC uplink.  The
+     * operator can adjust this at runtime — see bsp_audio_set_mic_gain_db(). */
+    esp_codec_dev_set_in_gain(s_dev, (float)s_mic_gain_db);
     if (r == ESP_CODEC_DEV_OK) r = esp_codec_dev_set_out_vol(s_dev, s_volume);
     if (r != ESP_CODEC_DEV_OK || s_io_error != ESP_CODEC_DEV_OK) {
         e = ESP_FAIL;
@@ -565,6 +569,31 @@ esp_err_t bsp_audio_read(void *pcm, size_t bytes) {
     if (!s_dev || !s_opened || s_sleeping) return ESP_ERR_INVALID_STATE;
     return esp_codec_dev_read(s_dev, pcm, bytes) == 0 ? ESP_OK : ESP_FAIL;
 }
+
+int bsp_audio_set_mic_gain_db(int db)
+{
+    /* The ES8311 input PGA is stepped, not continuous: the driver maps any
+     * requested value into 0/6/12/18/24/30/36/42 dB buckets.  Asking for 19,
+     * 20, 21, 22 or 23 all land on the same 18 dB register value, which is why
+     * nudging the knob appeared to do nothing.  Snap to the real steps so the
+     * number on screen is the number in the codec.
+     *
+     * Up to 42 dB, the chip's maximum.  The earlier 24 dB ceiling was based on
+     * an old note claiming 30 dB clipped the ADC — measurement since then shows
+     * 30 dB is still quiet on the far end, i.e. the microphone signal is weaker
+     * than that note assumed and the headroom is real.  If the far end reports
+     * splatter or the TX peak sits at full scale, come back down. */
+    if (db < 0) db = 0;
+    if (db > 42) db = 42;
+    db = (db / 6) * 6;                        /* snap down to a real step */
+    s_mic_gain_db = db;
+    if (s_dev && s_opened && !s_sleeping) {
+        esp_codec_dev_set_in_gain(s_dev, (float)db);
+    }
+    return s_mic_gain_db;
+}
+
+int bsp_audio_get_mic_gain_db(void) { return s_mic_gain_db; }
 
 void bsp_audio_set_volume(uint8_t percent) {
     s_volume = percent > 100 ? 100 : percent;

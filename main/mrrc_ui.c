@@ -33,6 +33,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "bsp_audio.h"
 #include "bsp_display.h"
 #include "lvgl.h"
 #include "mrrc_net.h"
@@ -189,6 +190,9 @@ static int s_batt_pct = -1;
 static bool s_batt_charging;
 static ui_mode_t s_ui_mode = UI_MODE_FREQ;
 static int s_spk_pct = 60;
+/* Generic knob position: speaker % in VOL mode, microphone dB in MIC mode. */
+static int s_mode_value = 60;
+
 static char s_chan_lbl[24];
 
 /* SS05 index -> Hz, same table as the handheld.  The old code hardcoded 100 kHz
@@ -523,8 +527,9 @@ static void refresh(void)
     /* The knob mode is ours, not the radio's: set it outside the main_changed
      * branch so it can never lag behind the keys by a server frame. */
     {
-        const char *m = s_ui_mode == UI_MODE_VOL ? "VOL"
-                      : (s_ui_mode == UI_MODE_CHANNEL ? "CH" : "FREQ");
+        const char *m = s_ui_mode == UI_MODE_VOL   ? "VOL"
+                      : s_ui_mode == UI_MODE_MIC   ? "MIC"
+                      : s_ui_mode == UI_MODE_CHANNEL ? "CH" : "FREQ";
         if (strcmp(m, lv_label_get_text(s_chip_mode)) != 0) {
             lv_label_set_text(s_chip_mode, m);
         }
@@ -546,7 +551,10 @@ static void refresh(void)
         /* Leftmost plate carries whatever the knob is pointed at — band name in
          * FREQ mode, channel name in CH, speaker level in VOL. */
         if (s_ui_mode == UI_MODE_VOL) {
-            snprintf(b, sizeof b, "%d%%", s_spk_pct);
+            snprintf(b, sizeof b, "%d%%", s_mode_value);
+            lv_label_set_text(s_bandplate, b);
+        } else if (s_ui_mode == UI_MODE_MIC) {
+            snprintf(b, sizeof b, "%d", s_mode_value);
             lv_label_set_text(s_bandplate, b);
         } else if (s_ui_mode == UI_MODE_CHANNEL && s_chan_lbl[0]) {
             lv_label_set_text(s_bandplate, s_chan_lbl);
@@ -574,7 +582,14 @@ static void refresh(void)
                                     lv_color_hex(mrrc_net_up() ? C_TEXT : C_RED), 0);
 
         /* filter + AF live in the info row; SPK replaces AF in VOL mode */
-        if (st.filter_hz > 0) {
+        if (tx) {
+            /* On TX this plate shows SWR instead of the filter width: it is the
+             * reading that protects the final, and the filter is not being
+             * adjusted mid-transmission. */
+            if (st.swr > 0.0f) snprintf(b, sizeof b, "SW %.1f", (double)st.swr);
+            else               snprintf(b, sizeof b, "SW --");
+            lv_label_set_text(s_fil, b);
+        } else if (st.filter_hz > 0) {
             /* "FL" not "FIL": the full word pushes the plate past its 62 px and
              * the row wraps onto the S-meter, but a bare value is cryptic. */
             snprintf(b, sizeof b, "FL %d.%dK", st.filter_hz / 1000,
@@ -583,7 +598,16 @@ static void refresh(void)
         } else {
             lv_label_set_text(s_fil, "");
         }
-        snprintf(b, sizeof b, "SPK %d%%", s_spk_pct);
+        /* The right-hand plate shows the audio level the knob is NOT
+         * currently moving, so both are always visible at a glance. */
+        if (s_ui_mode == UI_MODE_MIC) {
+            snprintf(b, sizeof b, "SPK %d%%", s_spk_pct);
+        } else {
+            /* No "dB" suffix: the plate is 62 px wide and "MIC 24dB" wrapped
+             * onto the S-meter row.  The number alone fits and the mode chip
+             * already says MIC. */
+            snprintf(b, sizeof b, "MIC %d", bsp_audio_get_mic_gain_db());
+        }
         lv_label_set_text(s_af, b);
 
         /* scale row around the VFO */
@@ -596,12 +620,33 @@ static void refresh(void)
     }
 
     if (meter_changed || main_changed) {
-        /* S number and bar share the row: number is the server's s_unit
-         * ("9", "+10", "5"), bar is the raw 0..255 level. */
-        if (st.s_unit[0] == '+') snprintf(b, sizeof b, "S9%s", st.s_unit);
-        else snprintf(b, sizeof b, "%s", st.s_unit[0] ? st.s_unit : "-");
-        lv_label_set_text(s_sunit, b);
-        lv_bar_set_value(s_sbar, st.s_meter, LV_ANIM_OFF);
+        /* This row carries whichever meter matters right now: the S-meter while
+         * receiving, and power / SWR while transmitting.  The bar is filled from
+         * a scaled version of that same quantity, so it stays meaningful in
+         * both directions.
+         *
+         * SWR is the number that matters on TX — an operator watching power
+         * alone can burn a final by feeding a mismatched antenna. */
+        if (tx) {
+            if (st.power_w >= 0.0f) snprintf(b, sizeof b, "%dW", (int)(st.power_w + 0.5f));
+            else                    snprintf(b, sizeof b, "--W");
+            lv_label_set_text(s_sunit, b);
+
+            /* Bar shows forward power on a 0..150 W scale, which covers this
+             * radio's 100 W and still leaves headroom to spot an overshoot. */
+            int pw = (int)(st.power_w < 0.0f ? 0.0f : st.power_w);
+            if (pw > 150) pw = 150;
+            lv_bar_set_value(s_sbar, pw * 255 / 150, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(s_sbar, lv_color_hex(C_RED), LV_PART_INDICATOR);
+        } else {
+            /* S number and bar share the row: number is the server's s_unit
+             * ("9", "+10", "5"), bar is the raw 0..255 level. */
+            if (st.s_unit[0] == '+') snprintf(b, sizeof b, "S9%s", st.s_unit);
+            else snprintf(b, sizeof b, "%s", st.s_unit[0] ? st.s_unit : "-");
+            lv_label_set_text(s_sunit, b);
+            lv_bar_set_value(s_sbar, st.s_meter, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(s_sbar, lv_color_hex(C_ACCENT), LV_PART_INDICATOR);
+        }
         s_last_meter = st.meter_seq;
     }
 
@@ -662,11 +707,13 @@ void mrrc_ui_spectrum(const uint8_t *bins, size_t n)
     s_bins_new = true;
 }
 
-void mrrc_ui_set_mode(ui_mode_t mode, int volume_pct)
+/* `value` is the knob position for whichever mode is active: speaker percent
+ * in VOL, microphone dB in MIC (the refresh() branch decides how to label it). */
+void mrrc_ui_set_mode(ui_mode_t mode, int value)
 {
-    if (s_ui_mode == mode && s_spk_pct == volume_pct) return;
+    if (s_ui_mode == mode && s_mode_value == value) return;
     s_ui_mode = mode;
-    s_spk_pct = volume_pct;
+    s_mode_value = value;
     if (!bsp_lvgl_lock(100)) return;
     s_last_seq = 0xFFFFFFFF;      /* force the field branch next refresh */
     bsp_lvgl_unlock();

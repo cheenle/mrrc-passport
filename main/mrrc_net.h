@@ -33,6 +33,11 @@ typedef struct {
     char    band_name[MRRC_BAND_NAME_LEN];
     int     s_meter;        /* 0..255 */
     char    s_unit[MRRC_S_UNIT_LEN];
+    /* TX meters, shown in place of the S-meter while transmitting.  The
+     * server publishes these as power_meter.power_watts / swr_meter.swr_ratio;
+     * -1 means "not reported" and the panel shows dashes. */
+    float   power_w;        /* PEP watts */
+    float   swr;            /* 1.0 .. 99.9 */
     int     af_gain;
     int     scope_span;         /* SS05 index into k_spans_hz; 6 = 100 kHz */
     int     filter_hz;
