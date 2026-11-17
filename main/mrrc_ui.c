@@ -10,7 +10,8 @@
 // this panel has.
 //
 //   y   0.. 21  chrome bar: [LSB]              VFO A   87%   ⣿      (+ accent rule)
-//   y  26.. 78  frequency  "7.079.51"   white, RED on TX
+//   y  30.. 82  frequency  "7.079.51"   always white (the handheld turns it
+//               red on TX; on this panel the chips bar already says TX)
 //   y  84..100  S-meter row:  S9+10 ▮▮▮▮▮▮░░   FIL 2.4K    AF 128
 //   y 106..117  SPECTRUM SCOPE                                    100K
 //   y 120..199  spectrum line plot (blue, RED on TX, centre marker)
@@ -57,7 +58,7 @@
 #define SCR_W       240
 #define SCR_H       320
 #define H_HDR       22
-#define Y_FREQ      26
+#define Y_FREQ      30
 #define Y_INFO      84
 #define H_INFO      17
 #define Y_LBL       106                 /* scope caption + toast anchor */
@@ -204,17 +205,23 @@ static lv_obj_t *plain(const lv_font_t *font, lv_color_t color, int x, int y)
     return l;
 }
 
-/* Four RSSI bars, right aligned — the handheld's draw_wifi_icon(). */
-static void draw_wifi_bars(lv_obj_t *o, int rssi, bool up)
+/* Link strength as a dBm number.  The handheld draws four 2 px bars, which at
+ * this font size is unreadable on our panel; the figure itself is unambiguous
+ * and colour-codes the same three bands. */
+static void draw_rssi(lv_obj_t *o, int rssi, bool up)
 {
     char b[16];
-    if (!up) { snprintf(b, sizeof b, "--"); }
-    else if (rssi > -55) { snprintf(b, sizeof b, "\xE2\x96\x88\xE2\x96\x88\xE2\x96\x88\xE2\x96\x88"); }
-    else if (rssi > -67) { snprintf(b, sizeof b, "\xE2\x96\x88\xE2\x96\x88\xE2\x96\x88"); }
-    else if (rssi > -75) { snprintf(b, sizeof b, "\xE2\x96\x88\xE2\x96\x88"); }
-    else                 { snprintf(b, sizeof b, "\xE2\x96\x88"); }
+    if (!up || rssi == 0) {
+        lv_label_set_text(o, "--");
+        lv_obj_set_style_text_color(o, lv_color_hex(C_FAINT), 0);
+        return;
+    }
+    snprintf(b, sizeof b, "%d", rssi);
     lv_label_set_text(o, b);
-    lv_obj_set_style_text_color(o, up ? lv_color_hex(C_GREEN) : lv_color_hex(C_FAINT), 0);
+    lv_color_t c = rssi > -55 ? lv_color_hex(C_GREEN)
+               : rssi > -70   ? lv_color_hex(C_ORANGE)
+                              : lv_color_hex(C_RED);
+    lv_obj_set_style_text_color(o, c, 0);
 }
 
 static void build_screen(void)
@@ -225,19 +232,28 @@ static void build_screen(void)
     lv_screen_load(scr);
 
     /* ── top chrome: one bar, one colour, plus the accent rule ── */
-    s_bar_top = bar(0, H_HDR);
-    s_mode = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 6, 3);
+    s_bar_top = bar(0, H_HDR + 24);   /* taller: content lives below the curve */
+    /* This is a rounded-corner panel: glyphs placed at the raw bar top get
+     * clipped by the corner mask, so everything in the chrome sits lower than
+     * it would on the handheld's square 240x240. */
+    s_mode = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 8, H_HDR + 4);
     lv_label_set_text(s_mode, "---");
-    s_wifi = plain(&lv_font_montserrat_14, lv_color_hex(C_FAINT), SCR_W - 34, 3);
-    s_batt = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 76, 3);
-    s_vfo  = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 150, 3);
+    s_wifi = plain(&lv_font_montserrat_20, lv_color_hex(C_TEXT), SCR_W - 52, H_HDR + 3);
+    s_batt = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 108, H_HDR + 4);
+    s_vfo  = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 186, H_HDR + 4);
     lv_obj_set_style_text_align(s_vfo, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_width(s_vfo, 70);
-    lv_obj_set_style_bg_color(s_bar_top, lv_color_hex(C_BAR), 0);
-    /* the accent rule is the bar's own bottom border */
-    lv_obj_set_style_border_width(s_bar_top, 1, 0);
-    lv_obj_set_style_border_color(s_bar_top, lv_color_hex(C_ORANGE), 0);
-    lv_obj_set_style_border_side(s_bar_top, LV_BORDER_SIDE_BOTTOM, 0);
+    /* The bar is tall so its lower edge clears the corner mask, but the orange
+     * accent rule still belongs at the chrome/frequency boundary — draw it as
+     * its own line rather than the bar's bottom border. */
+    lv_obj_set_style_border_width(s_bar_top, 0, 0);
+    lv_obj_t *rule = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(rule, SCR_W, 1);
+    lv_obj_set_pos(rule, 0, H_HDR + 2);
+    lv_obj_set_style_radius(rule, 0, 0);
+    lv_obj_set_style_bg_color(rule, lv_color_hex(C_ORANGE), 0);
+    lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(rule, LV_OBJ_FLAG_SCROLLABLE);
 
     /* ── frequency ── */
     s_freq = plain(&lv_font_montserrat_28, lv_color_hex(C_TEXT), 0, Y_FREQ);
@@ -273,9 +289,14 @@ static void build_screen(void)
     s_spec_line = lv_line_create(lv_screen_active());
     lv_obj_set_pos(s_spec_line, 0, Y_PLOT);
     lv_obj_set_size(s_spec_line, SCR_W, PLOT_H);
-    lv_obj_set_style_line_width(s_spec_line, 2, 0);
+    /* Rounded joins matter here: with butt caps, LVGL's antialiased segments
+     * leave visible gaps wherever the trace steps sharply, which reads as a
+     * row of dots instead of one line. */
+    lv_obj_set_style_line_width(s_spec_line, 3, 0);
     lv_obj_set_style_line_color(s_spec_line, lv_color_hex(C_BLUE), 0);
-    lv_obj_set_style_line_rounded(s_spec_line, false, 0);
+    /* This LVGL build has no separate cap style; rounded is what turns on
+     * round joins and caps in the software renderer. */
+    lv_obj_set_style_line_rounded(s_spec_line, true, 0);
     for (int x = 0; x < SCR_W; x++) { s_pts[x].x = x; s_pts[x].y = PLOT_H - 1; }
     lv_line_set_points(s_spec_line, s_pts, SCR_W);
 
@@ -306,6 +327,7 @@ static void build_screen(void)
     lv_obj_set_style_bg_opa(s_toast, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(s_toast, 3, 0);
     lv_label_set_text(s_toast, "");
+    lv_obj_add_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
 
     heat_init();
     memset(s_wf_buf, 0, sizeof s_wf_buf);
@@ -365,14 +387,11 @@ static void refresh(void)
     if (main_changed) {
         format_freq(b, sizeof b, st.freq_hz);
         lv_label_set_text(s_freq, b);
-        lv_obj_set_style_text_color(s_freq,
-                                    tx ? lv_color_hex(C_RED) : lv_color_hex(C_TEXT), 0);
-
         /* header: mode left, VFO / battery / wifi right */
         lv_label_set_text(s_mode, st.mode_name[0] ? st.mode_name : "---");
         snprintf(b, sizeof b, "VFO %c", st.vfo ? st.vfo : 'A');
         lv_label_set_text(s_vfo, b);
-        draw_wifi_bars(s_wifi, mrrc_net_rssi(), mrrc_net_up());
+        draw_rssi(s_wifi, mrrc_net_rssi(), mrrc_net_up());
 
         /* chips bar: knob mode | RX or TX seconds | link */
         const char *m = s_ui_mode == UI_MODE_VOL ? "VOL"
@@ -517,5 +536,10 @@ void mrrc_ui_set_toast(const char *text)
 {
     if (!bsp_lvgl_lock(100)) return;
     lv_label_set_text(s_toast, text ? text : "");
+    /* An empty label with a filled background still paints a small solid
+     * square at the bottom of the screen — hide it until there is something to
+     * say. */
+    if (text && text[0]) lv_obj_clear_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
     bsp_lvgl_unlock();
 }
