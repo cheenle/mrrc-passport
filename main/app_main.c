@@ -413,7 +413,12 @@ void app_main(void)
         unsigned k = 0, kf = 0, kfr = 0, ksf = 0, krf = 0, kld = 0;
         mrrc_tx_stats(&k, &kf, &kfr, &ksf, &krf, &kld);
         if (s_audio_task_h)
-            ESP_LOGI(TAG, "stack: audio min free=%u B",
+            {
+            uint32_t dl = 0, df = 0;
+            mrrc_audio_drop_detail(&dl, &df);
+            ESP_LOGI(TAG, "audio drops: lock=%u full=%u", (unsigned)dl, (unsigned)df);
+        }
+        ESP_LOGI(TAG, "stack: audio min free=%u B",
                      (unsigned)(uxTaskGetStackHighWaterMark(s_audio_task_h)));
         ESP_LOGI(TAG, "tx: keys=%u fails=%u frames=%u sendfail=%u readfail=%u "
                       "linkdowns=%u last=%s",

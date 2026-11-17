@@ -46,6 +46,7 @@ static SemaphoreHandle_t s_rb_mtx;
 TaskHandle_t s_audio_task_h;
 
 static uint32_t s_frames, s_errors, s_drops;
+static uint32_t s_drop_lock, s_drop_full;   /* which rb_put point dropped it */
 static volatile bool s_muted;
 static int s_feed_dbg;    /* first few frames: what do the bytes look like? */   /* downlink muted while transmitting */
 
@@ -57,9 +58,10 @@ static int s_feed_dbg;    /* first few frames: what do the bytes look like? */  
 static void rb_put(const uint8_t *d, size_t n)
 {
     if (n == 0 || n > AUD_FRAME_MAX) return;
-    if (xSemaphoreTake(s_rb_mtx, 0) != pdTRUE) { s_drops++; return; }
+    if (xSemaphoreTake(s_rb_mtx, 0) != pdTRUE) { s_drops++; s_drop_lock++; return; }
     if (AUD_RB_BYTES - s_used < n + 2) {
         s_drops++;
+        s_drop_full++;
         xSemaphoreGive(s_rb_mtx);
         return;
     }
@@ -195,6 +197,14 @@ void mrrc_audio_start(void)
         ESP_LOGE(TAG, "audio task failed");
         return;
     }
+}
+
+/* Which rb_put path is dropping: 'lock' = could not get the mutex,
+ * 'full' = the ring had no room.  They need different fixes. */
+void mrrc_audio_drop_detail(uint32_t *lock, uint32_t *full)
+{
+    if (lock) *lock = s_drop_lock;
+    if (full) *full = s_drop_full;
 }
 
 void mrrc_audio_stats(uint32_t *frames, uint32_t *errors, uint32_t *drops)

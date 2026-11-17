@@ -9,9 +9,11 @@
 
 static const char *TAG = "bsp_lvgl";
 
-/* 8 lines: this terminal needs the internal RAM for Opus.  40 lines
- * (19.2 KB) left the largest free block at 9 KB, which is below the 15 KB
- * an Opus encoder needs. */
+/* 8 lines = 3.8 KB.  Raising this to 20 to halve the SPI transactions looked
+ * like a win on paper, but it costs 5.6 KB of contiguous internal RAM and PTT
+ * needs ~16 KB in one piece for a TLS record — with the waterfall and audio
+ * ring also enlarged the largest free block fell far enough that transmissions
+ * dropped on their own.  Left at 8; the extra transfers are the cheaper price. */
 #define BSP_LVGL_DRAW_BUFFER_LINES 8
 
 static lv_display_t *s_disp;

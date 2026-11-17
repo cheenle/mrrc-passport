@@ -26,6 +26,8 @@ void mrrc_audio_suspend(void);
 void mrrc_audio_resume(void);
 
 void mrrc_audio_stats(uint32_t *frames, uint32_t *errors, uint32_t *drops);
+/* Split of the drop counter: metux contention vs. ring full. */
+void mrrc_audio_drop_detail(uint32_t *lock, uint32_t *full);
 
 /* Profiling: total frames played and the accumulated time spent in the audio
  * path.  dec_us is always 0 now that no decoder is linked in; the parameter is

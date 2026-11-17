@@ -38,7 +38,15 @@
 #include "mrrc_net.h"
 #include "mrrc_ui.h"
 
-#define REFRESH_MS 200
+/* 300 ms (3.3 Hz).
+ *
+ * LVGL measures 55% of this chip's CPU at a 200 ms tick, and the audio task
+ * (which needs to feed a blocking I2S write every 20 ms) only gets <1% — so
+ * the UI ticks are directly stealing the audio path's scheduling slots and the
+ * ring overflows.  The scope is the cheapest thing to give up: at 3.3 Hz the
+ * waterfall still advances at every third sweep or so, while LVGL's share drops
+ * by a third. */
+#define REFRESH_MS 300
 
 /* ── palette ────────────────────────────────────────────────────────────
  * THE VALUES BELOW ARE 24-BIT HEX, NOT RGB565.  They are handed to
@@ -77,11 +85,20 @@
 #define Y_SMET      121         /* row 2: the S-meter, on its own line */
 #define H_SMET      18
 #define Y_PLOT      146
-#define PLOT_H      56
-#define Y_WF        206
-#define WF_H        30                  /* RGB565: 240*30*2 = 14.4 KB */
-#define Y_SCALE     240
-#define Y_CHIPS     296
+#define PLOT_H      45                  /* 0.8x of 56: the trace is a convenience,
+                                         * the history is what gets read */
+/* 196, not 192: LVGL merges dirty areas that are adjacent or nearly so, so
+ * with the waterfall starting one row below the trace every update repainted
+ * the two together as one 146..232 block (~40 KB) instead of each on its own.
+ * A visible gap keeps them separate, which is the whole point of measuring
+ * whether the trace or the history is the expensive one. */
+#define Y_WF        196
+#define WF_H        40                  /* 240*40*2 = 18.8 KB of .bss.  60 rows was
+                                         * tried and took the low-water heap mark
+                                         * to 3 KB, too little for the TLS
+                                         * handshake PTT needs. */
+#define Y_SCALE     254
+#define Y_CHIPS     272
 #define H_CHIPS     22
 #define Y_TOAST     272   /* its own line above the scale row */
 
@@ -279,11 +296,11 @@ static void build_screen(void)
     s_bar_top = bar(0, H_HDR);
     /* Rounded-corner panel: glyphs at y=0 are clipped by the corner mask, so
      * the chrome row is centred inside a 26 px bar instead of hugging the top. */
-    s_mode = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 8, 8);
+    s_mode = plain(&lv_font_montserrat_12, lv_color_hex(C_ORANGE), 8, 8);
     lv_label_set_text(s_mode, "---");
     /* Right-anchored, widest first: the battery sits against the panel edge,
      * RSSI bars to its left, VFO label left of those. */
-    s_batt = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 44, 8);
+    s_batt = plain(&lv_font_montserrat_12, lv_color_hex(C_ORANGE), SCR_W - 44, 8);
     lv_obj_set_style_text_align(s_batt, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_size(s_batt, 40, 16);
     /* Four bars, 3 px wide with 2 px gaps, bottoms aligned at a common
@@ -301,7 +318,7 @@ static void build_screen(void)
         lv_obj_set_style_bg_color(s_bar[i], lv_color_hex(C_FIELD), 0);
         lv_obj_remove_flag(s_bar[i], LV_OBJ_FLAG_SCROLLABLE);
     }
-    s_vfo  = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 172, 8);
+    s_vfo  = plain(&lv_font_montserrat_12, lv_color_hex(C_ORANGE), SCR_W - 172, 8);
     lv_obj_set_style_text_align(s_vfo, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_width(s_vfo, 70);
     /* The bar is tall so its lower edge clears the corner mask, but the orange
@@ -316,16 +333,29 @@ static void build_screen(void)
     lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
     lv_obj_remove_flag(rule, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* Mirror of the header rule just above the chips bar, so the two chrome
+     * rows are enclosed the same way. */
+    lv_obj_t *rule_bot = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(rule_bot, SCR_W, 1);
+    lv_obj_set_pos(rule_bot, 0, Y_CHIPS - 2);
+    lv_obj_set_style_radius(rule_bot, 0, 0);
+    lv_obj_set_style_bg_color(rule_bot, lv_color_hex(C_ORANGE), 0);
+    lv_obj_set_style_bg_opa(rule_bot, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(rule_bot, LV_OBJ_FLAG_SCROLLABLE);
+
     /* ── frequency ── */
-    s_freq = plain(&lv_font_montserrat_28, lv_color_hex(C_TEXT), 0, Y_FREQ);
+    s_freq = plain(&lv_font_montserrat_44, lv_color_hex(C_TEXT), 0, Y_FREQ);
     lv_obj_align(s_freq, LV_ALIGN_TOP_MID, 0, Y_FREQ);
-    /* Montserrat 40 was compiled in to get crisp numerals, but each font face
-     * is several KB of glyph bitmaps and this part has no PSRAM: the face was
-     * dropped again and 28 is scaled up.  Time and RAM are both tight here, so
-     * the sharpness trade is the one to make. */
-    lv_obj_set_style_transform_scale(s_freq, 384, 0);
-    lv_obj_set_style_transform_pivot_x(s_freq, 50, 0);
-    lv_obj_set_style_transform_pivot_y(s_freq, 0, 0);
+    /* Native Montserrat 44, no scaling.
+     *
+     * Scaling 28 through transform_scale 384 did not grow the object, so 42 px
+     * of glyph drew into a 28 px box and LVGL clipped it to the top half;
+     * enlarging the box then blanked it entirely against this display's
+     * rounded-corner mask.  A real 44 px face is stable and crisp; 28 is no
+     * longer used anywhere, so one face replaces the other. */
+    lv_obj_set_width(s_freq, SCR_W);
+    lv_obj_set_height(s_freq, 52);
+    lv_obj_set_style_text_align(s_freq, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_freq, "---.---");
 
     /* ── row 1: band name (or FREQ / VOL / channel plate), then FIL, AF, SPAN ──
@@ -346,7 +376,7 @@ static void build_screen(void)
     lv_label_set_text(s_spanplate, "--");
 
     /* ── row 2: S-meter alone — unit text left, bar filling the rest ── */
-    s_sunit = field(&lv_font_montserrat_14, 2, Y_SMET, 52, false);
+    s_sunit = field(&lv_font_montserrat_12, 2, Y_SMET, 52, false);
     s_sbar  = lv_bar_create(lv_screen_active());
     lv_obj_set_size(s_sbar, SCR_W - 66, H_SMET - 4);
     lv_obj_set_pos(s_sbar, 62, Y_SMET + 2);
@@ -379,25 +409,25 @@ static void build_screen(void)
     lv_obj_set_pos(s_wf_img, 0, Y_WF);
 
     /* ── scale row: three fields like the handheld ── */
-    s_sc_l = field(&lv_font_montserrat_14, 2, Y_SCALE, 54, true);
-    s_sc_c = field(&lv_font_montserrat_14, 92, Y_SCALE, 56, false);
-    s_sc_r = field(&lv_font_montserrat_14, 184, Y_SCALE, 54, true);
+    s_sc_l = field(&lv_font_montserrat_12, 2, Y_SCALE, 54, true);
+    s_sc_c = field(&lv_font_montserrat_12, 92, Y_SCALE, 56, false);
+    s_sc_r = field(&lv_font_montserrat_12, 184, Y_SCALE, 54, true);
 
     /* ── bottom chips: mode | RX/TX | link ── */
     bar(Y_CHIPS, H_CHIPS);
     /* Three fixed, non-overlapping slots: knob mode left, RX/TX centred,
      * link state right.  Mixing an absolute x with LV_ALIGN_TOP_MID made the
      * mode text and the RX/TX text fight over the same place. */
-    s_chip_mode = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 8, Y_CHIPS + 2);
+    s_chip_mode = plain(&lv_font_montserrat_12, lv_color_hex(C_ORANGE), 8, Y_CHIPS + 2);
     lv_obj_set_width(s_chip_mode, 44);
     lv_label_set_text(s_chip_mode, "FREQ");
 
-    s_chip_tx = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 96, Y_CHIPS + 2);
+    s_chip_tx = plain(&lv_font_montserrat_12, lv_color_hex(C_ORANGE), 96, Y_CHIPS + 2);
     lv_obj_set_width(s_chip_tx, 48);
     lv_obj_set_style_text_align(s_chip_tx, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_chip_tx, "RX");
 
-    s_chip_link = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 52, Y_CHIPS + 2);
+    s_chip_link = plain(&lv_font_montserrat_12, lv_color_hex(C_ORANGE), SCR_W - 52, Y_CHIPS + 2);
     lv_obj_set_width(s_chip_link, 52);
     lv_obj_set_style_text_align(s_chip_link, LV_TEXT_ALIGN_RIGHT, 0);
     lv_label_set_text(s_chip_link, "LINK");
@@ -567,7 +597,14 @@ static void refresh(void)
         fft_update(s_cols);
     }
 
-    if (s_started) {
+    /* Skip the scope while transmitting.
+     *
+     * The radio is not receiving, and the spectrum tier is dropped to "low" for
+     * the duration, so there is nothing worth drawing.  LVGL is the largest CPU
+     * consumer on this chip (measured 49% at 10 Hz ticks, 27% at 5 Hz); every
+     * cycle it takes is one the WebSocket task does not get, and starving that
+     * task is what dropped the link mid-transmission. */
+    if (s_started && !tx) {
         update_plot(tx);
         /* Two rows per tick at 5 ticks/s = 10 rows/s, so the WF_H-row history
          * scrolls in about six seconds.  One row per tick looked frozen. */

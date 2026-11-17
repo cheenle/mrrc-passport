@@ -24,12 +24,20 @@ static const char *TAG = "tx";
 
 #define TX_TASK_STACK   4096
 #define TX_FRAME_16K    320         /* 20 ms @ 16 kHz, sent as-is */
-#define TX_FRAME_48K    960         /* 20 ms @ 48 kHz after the fallback expansion */
+/* Buffer capacity.  The 48 kHz fallback path is gone, but the allocation is
+ * sized a little larger than one 20 ms frame so the "[chan][tag][samples]"
+ * header never pushes a frame over the end. */
+#define TX_BUF_SAMPLES  960
 /* 0x02 = raw Int16 PCM captured at 16 kHz.  A distinct tag (not 0x00, which
  * means 48 kHz) so the server knows to resample; the browser's own uplink is
  * untouched. */
+/* /WSterminal prefixes every binary frame with a channel byte
+ * (server: TERMINAL_CHAN_*): 0x01 uplink audio, 0x00 downlink audio,
+ * 0x02 spectrum.  Without it the server read our codec tag 0x02 as the
+ * *spectrum* channel and threw the PCM away — the uplink never reached the
+ * radio, which is why transmitting produced no power. */
+#define AUDIO_CHAN_TX      0x01
 #define AUDIO_TAG_PCM_16K  0x02        /* raw Int16 at 16 kHz (server: pcm16) */
-#define AUDIO_TAG_PCM_48K  0x00        /* legacy raw Int16 at 48 kHz */
 #define TX_MAX_HOLD_MS  180000
 #define TX_HB_MS        1500
 
@@ -68,9 +76,12 @@ static void tx_task(void *arg)
      * confirms the pcm16 profile, otherwise the legacy 48 kHz tag 0x00, which
      * needs the 3x zero-order hold to reach 48 kHz.
      */
-    static int16_t buf[1 + TX_FRAME_48K];
-    uint8_t *tag = (uint8_t *)buf;
-    int16_t *pcm = buf + 1;
+    /* [0]=channel, [1]=codec tag, [2..]=samples. */
+    static int16_t buf[2 + TX_BUF_SAMPLES];
+    uint8_t *chan = (uint8_t *)buf;
+    uint8_t *tag = (uint8_t *)buf + 1;
+    int16_t *pcm = buf + 2;
+    *chan = AUDIO_CHAN_TX;
 
     int64_t last_hb = 0;
     const int64_t started = esp_timer_get_time();
@@ -103,21 +114,12 @@ static void tx_task(void *arg)
         s_peak_avg_sum += (int)(sum / TX_FRAME_16K);
         s_peak_avg_n++;
 
-        size_t bytes;
-        if (mrrc_net_audio_16k()) {
-            /* Native 16 kHz: no conversion, the server upsamples. */
-            *tag = AUDIO_TAG_PCM_16K;
-            bytes = 1 + TX_FRAME_16K * sizeof(int16_t);
-        } else {
-            /* Legacy 48 kHz PCM: 3x zero-order hold, expanded from the back so
-             * the source samples are not overwritten before they are read. */
-            *tag = AUDIO_TAG_PCM_48K;
-            for (int i = TX_FRAME_16K - 1; i >= 0; i--) {
-                const int16_t v = pcm[i];
-                pcm[i * 3] = pcm[i * 3 + 1] = pcm[i * 3 + 2] = v;
-            }
-            bytes = 1 + TX_FRAME_48K * sizeof(int16_t);
-        }
+        /* 16 kHz in, 16 kHz out — the server resamples for the radio.  The
+         * 48 kHz fallback (3x zero-order hold) is gone: every reachable server
+         * confirms pcm16, and the branch was both dead and the source of an
+         * out-of-bounds write if the frame length ever changed. */
+        *tag = AUDIO_TAG_PCM_16K;
+        const size_t bytes = 2 + TX_FRAME_16K * sizeof(int16_t);
 
         if (mrrc_net_send_bin(buf, bytes)) {
             s_tx_frames++;

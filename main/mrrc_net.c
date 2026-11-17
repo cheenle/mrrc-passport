@@ -250,10 +250,15 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "/WSterminal connected");
         s_ctrl_up = true;
-        /* mid profile: 850 bins, 851-byte payloads — small enough to parse on
-         * this chip and detailed enough for a 240-px scope. */
-        esp_websocket_client_send_text(s_ws, "{\"type\":\"spectrumCaps\",\"profile\":\"mid\"}",
-                                       (int)strlen("{\"type\":\"spectrumCaps\",\"profile\":\"mid\"}"),
+        /* high = Full: one frame per radio sweep, 850 bins, ~5.3 frames/s.
+         *
+         * This was "mid" (divider 2, 425 bins, ~2.7 frames/s).  Each frame is
+         * one row of waterfall history, so at half the sweep rate the display
+         * could only ever advance in visible steps.  The 850-bin buffer this
+         * firmware already allocates was sized for Full from the start; the
+         * extra ~55 kbit/s is small next to the 256 kbit/s audio uplink. */
+        esp_websocket_client_send_text(s_ws, "{\"type\":\"spectrumCaps\",\"profile\":\"high\"}",
+                                       (int)strlen("{\"type\":\"spectrumCaps\",\"profile\":\"high\"}"),
                                        pdMS_TO_TICKS(500));
         /* Declare the PCM16 audio profile (server side: AD-038).
          *
