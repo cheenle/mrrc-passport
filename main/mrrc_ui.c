@@ -330,19 +330,18 @@ static void build_screen(void)
     /* ── row 1: band name (or FREQ / VOL / channel plate), then FIL, AF, SPAN ──
      * The band label used to sit in the scope caption row; the operator wants it
      * beside the readouts that share its timescale. */
-    /* Four plates must fit 240 px.  "FIL 2.4K" at Montserrat 14 needs ~62 px and
-     * the row wrapped onto the S-meter line; this build only compiles 14/20/28,
-     * so the labels are shortened to bare values in the same 14 px face —
-     * 2.4K / 0 / 200K are self-evident next to their own plates. */
-    s_bandplate = field(&lv_font_montserrat_14, 2, Y_INFO, 54, false);
+    /* Four plates across 240 px, all in Montserrat 12.  At 14 the strings did
+     * not fit and LVGL wrapped them onto the S-meter line; one size down leaves
+     * room for the labels at full length instead of shaving pixels per plate. */
+    s_bandplate = field(&lv_font_montserrat_12, 2, Y_INFO, 54, false);
     lv_obj_set_style_text_color(s_bandplate, lv_color_hex(C_ACCENT), 0);
     lv_label_set_text(s_bandplate, "---");
-    s_fil = field(&lv_font_montserrat_14, 59, Y_INFO, 56, false);
+    s_fil = field(&lv_font_montserrat_12, 59, Y_INFO, 56, false);
     /* Speaker level of THIS device, not the radio's own AF gain: af_gain is a
      * rig setting the terminal cannot change, so showing it was misleading —
      * the number never responded to the VOL knob. */
-    s_af  = field(&lv_font_montserrat_14, 118, Y_INFO, 64, false);
-    s_spanplate = field(&lv_font_montserrat_14, 185, Y_INFO, 53, true);
+    s_af  = field(&lv_font_montserrat_12, 118, Y_INFO, 64, false);
+    s_spanplate = field(&lv_font_montserrat_12, 185, Y_INFO, 53, true);
     lv_label_set_text(s_spanplate, "--");
 
     /* ── row 2: S-meter alone — unit text left, bar filling the rest ── */
