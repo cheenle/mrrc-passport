@@ -63,6 +63,9 @@ void mrrc_net_set_ptt(bool on);
 
 /* Jump to a stored channel: frequency and mode together. */
 void mrrc_net_set_chan(int index);
+/* Re-asserts the pending channel frequency once a mode transition has settled;
+ * call periodically (the UI task's 5 Hz tick is a good place). */
+void mrrc_net_chan_pump(void);
 /* Cycle to the next working mode (LSB -> USB -> CW-U -> ...). */
 void mrrc_net_next_mode(void);
 

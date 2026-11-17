@@ -22,6 +22,7 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_tls.h"
 #include "esp_wifi.h"
 #include "esp_websocket_client.h"
@@ -47,6 +48,10 @@ static const char *TAG = "net";
 mrrc_state_t g_radio;
 mrrc_chan_t g_chans[MRRC_MAX_CH];
 int g_chan_count;
+
+/* Channel frequency to re-assert after a mode change has settled. */
+static int32_t s_pending_chan_freq;
+static int64_t s_pending_chan_at;
 
 static SemaphoreHandle_t s_lock;
 static char s_token[TOKEN_MAX];
@@ -291,14 +296,43 @@ void mrrc_net_set_chan(int index)
 {
     if (index < 0 || index >= g_chan_count) return;
     const mrrc_chan_t *c = &g_chans[index];
-    mrrc_net_set_freq(c->freq_hz);
+
+    /* Mode FIRST, then frequency.
+     *
+     * Switching mode makes the rig apply its own mode-dependent offset (CW pitch
+     * and friends), which moved the displayed frequency by about 1.4 kHz when
+     * the order was freq-then-mode: the frequency we had just written got
+     * re-quantised by the mode change.  The browser client sets mode first, and
+     * the stored frequency is what the operator expects to come back, so the
+     * same order is used here.
+     */
     if (c->mode[0]) {
         char msg[64];
         snprintf(msg, sizeof msg,
                  "{\"type\":\"set\",\"field\":\"mode\",\"value\":\"%s\"}", c->mode);
         ws_send_text(msg);
     }
+    mrrc_net_set_freq(c->freq_hz);
+
+    /* Re-assert shortly after: the mode transition is asynchronous on the rig
+     * side, so one more write guarantees the channel's own frequency is what
+     * ends up active rather than whatever the transition left behind. */
+    s_pending_chan_freq = c->freq_hz;
+    s_pending_chan_at = esp_timer_get_time() + 400000;
+
     ESP_LOGI(TAG, "chan %d -> %ld %s", index, (long)c->freq_hz, c->mode);
+}
+
+/* Called from the network task's pump; re-asserts a channel frequency once the
+ * mode transition has settled. */
+void mrrc_net_chan_pump(void)
+{
+    if (!s_pending_chan_freq) return;
+    if (esp_timer_get_time() < s_pending_chan_at) return;
+    const int32_t hz = s_pending_chan_freq;
+    s_pending_chan_freq = 0;
+    mrrc_net_set_freq(hz);
+    ESP_LOGI(TAG, "chan freq re-asserted %ld", (long)hz);
 }
 
 void mrrc_net_next_mode(void)

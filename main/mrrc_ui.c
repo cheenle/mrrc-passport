@@ -337,8 +337,11 @@ static void build_screen(void)
     s_bandplate = field(&lv_font_montserrat_14, 2, Y_INFO, 54, false);
     lv_obj_set_style_text_color(s_bandplate, lv_color_hex(C_ACCENT), 0);
     lv_label_set_text(s_bandplate, "---");
-    s_fil = field(&lv_font_montserrat_14, 59, Y_INFO, 62, false);
-    s_af  = field(&lv_font_montserrat_14, 124, Y_INFO, 58, false);
+    s_fil = field(&lv_font_montserrat_14, 59, Y_INFO, 56, false);
+    /* Speaker level of THIS device, not the radio's own AF gain: af_gain is a
+     * rig setting the terminal cannot change, so showing it was misleading —
+     * the number never responded to the VOL knob. */
+    s_af  = field(&lv_font_montserrat_14, 118, Y_INFO, 64, false);
     s_spanplate = field(&lv_font_montserrat_14, 185, Y_INFO, 53, true);
     lv_label_set_text(s_spanplate, "--");
 
@@ -446,6 +449,9 @@ static void wf_push(int t_permille)
 
 static void refresh(void)
 {
+    /* May write to the socket, so it runs before any LVGL work. */
+    mrrc_net_chan_pump();
+
     mrrc_state_t st;
     mrrc_state_lock();
     st = g_radio;
@@ -519,7 +525,7 @@ static void refresh(void)
         } else {
             lv_label_set_text(s_fil, "");
         }
-        snprintf(b, sizeof b, "AF %d", st.af_gain);
+        snprintf(b, sizeof b, "SPK %d%%", s_spk_pct);
         lv_label_set_text(s_af, b);
 
         /* scale row around the VFO */
