@@ -39,37 +39,47 @@
 
 #define REFRESH_MS 200
 
-/* ── palette (verbatim from the handheld) ───────────────────────────────
- * Frequency readout is white; chrome bars are one flat colour edge to edge,
- * because separate badge/chip boxes read as coloured blobs on this panel.
- * Scope colours do NOT come from here — they use the Jet table below. */
-#define C_BAR       0x2965      /* #2a2a2a — top and bottom bars */
-#define C_ORANGE    0xFD20      /* #ffa500 — web accent, the rule under the header */
-#define C_FIELD     0x39E7      /* #3a3a3a — text field background */
-#define C_FIELD_D   0x2104      /* #212121 — dimmer field */
-#define C_ACCENT    0xB901      /* bright orange, small accents only */
-#define C_FAINT     0x4200      /* ~25 % orange, barely-there marks */
-#define C_TEXT      0xFFFF
-#define C_RED       0xF800
-#define C_GREEN     0x07E0
-#define C_BLUE      0x3C1E      /* #3b82f6 — legible over both plots */
+/* ── palette ────────────────────────────────────────────────────────────
+ * THE VALUES BELOW ARE 24-BIT HEX, NOT RGB565.  They are handed to
+ * lv_color_hex(), which takes 0xRRGGBB and converts at run time.  The
+ * handheld's ui.c defines the same colours as pre-converted RGB565 literals
+ * because it writes its own framebuffer; copying those literals into a
+ * lv_color_hex() call re-interprets them as the low 16 bits of an RGB24
+ * triple and silently shifts the whole palette — 0xFFFF ("white") becomes
+ * 0x00FFFF cyan, and 0x3C1E (blue) becomes 0x003C1E dark green.  Both bugs
+ * were visible on hardware before this note was written.
+ *
+ * Same source colours as the handheld / web client, expressed as they were
+ * meant to read: #2a2a2a chrome, #ffa500 accent, #3a3a3a fields, #3b82f6 trace. */
+#define C_BAR       0x2A2A2A      /* flat top and bottom bars */
+#define C_ORANGE    0xFFA500      /* accent rule */
+#define C_FIELD     0x3A3A3A      /* text field plate */
+#define C_FIELD_D   0x212121      /* dimmer plate */
+#define C_ACCENT    0xE87A00      /* bright orange, small accents only */
+#define C_FAINT     0x6B4A00      /* ~25 % orange, barely-there marks */
+#define C_TEXT      0xFFFFFF
+#define C_RED       0xFF0000
+#define C_GREEN     0x00FF00
+#define C_BLUE      0x3B82F6      /* #3b82f6 — the spectrum trace */
 
-/* ── layout ─────────────────────────────────────────────────────────── */
+/* ── layout ─────────────────────────────────────────────────────────────
+ * This is a rounded-corner panel: the header content starts below the curve
+ * and the frequency sits under the accent rule rather than overlapping it. */
 #define SCR_W       240
 #define SCR_H       320
-#define H_HDR       22
-#define Y_FREQ      30
-#define Y_INFO      84
+#define H_HDR       26          /* chrome bar height; its text sits inside it */
+#define Y_FREQ      46          /* below the accent rule, clear of the bar */
+#define Y_INFO      96
 #define H_INFO      17
-#define Y_LBL       106                 /* scope caption + toast anchor */
-#define Y_PLOT      120
-#define PLOT_H      80
-#define Y_WF        200
+#define Y_LBL       116                 /* scope caption + toast anchor */
+#define Y_PLOT      130
+#define PLOT_H      72
+#define Y_WF        202
 #define WF_H        30                  /* RGB565: 240*30*2 = 14.4 KB */
-#define Y_SCALE     262
-#define Y_CHIPS     276
-#define H_CHIPS     20
-#define Y_TOAST     300
+#define Y_SCALE     236
+#define Y_CHIPS     292
+#define H_CHIPS     22
+#define Y_TOAST     296
 
 #define BINS        850
 
@@ -232,15 +242,14 @@ static void build_screen(void)
     lv_screen_load(scr);
 
     /* ── top chrome: one bar, one colour, plus the accent rule ── */
-    s_bar_top = bar(0, H_HDR + 24);   /* taller: content lives below the curve */
-    /* This is a rounded-corner panel: glyphs placed at the raw bar top get
-     * clipped by the corner mask, so everything in the chrome sits lower than
-     * it would on the handheld's square 240x240. */
-    s_mode = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 8, H_HDR + 4);
+    s_bar_top = bar(0, H_HDR);
+    /* Rounded-corner panel: glyphs at y=0 are clipped by the corner mask, so
+     * the chrome row is centred inside a 26 px bar instead of hugging the top. */
+    s_mode = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), 8, 8);
     lv_label_set_text(s_mode, "---");
-    s_wifi = plain(&lv_font_montserrat_20, lv_color_hex(C_TEXT), SCR_W - 52, H_HDR + 3);
-    s_batt = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 108, H_HDR + 4);
-    s_vfo  = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 186, H_HDR + 4);
+    s_wifi = plain(&lv_font_montserrat_20, lv_color_hex(C_TEXT), SCR_W - 52, 7);
+    s_batt = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 108, 8);
+    s_vfo  = plain(&lv_font_montserrat_14, lv_color_hex(C_TEXT), SCR_W - 186, 8);
     lv_obj_set_style_text_align(s_vfo, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_width(s_vfo, 70);
     /* The bar is tall so its lower edge clears the corner mask, but the orange
@@ -249,7 +258,7 @@ static void build_screen(void)
     lv_obj_set_style_border_width(s_bar_top, 0, 0);
     lv_obj_t *rule = lv_obj_create(lv_screen_active());
     lv_obj_set_size(rule, SCR_W, 1);
-    lv_obj_set_pos(rule, 0, H_HDR + 2);
+    lv_obj_set_pos(rule, 0, H_HDR);
     lv_obj_set_style_radius(rule, 0, 0);
     lv_obj_set_style_bg_color(rule, lv_color_hex(C_ORANGE), 0);
     lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
