@@ -27,6 +27,10 @@
 #include "esp_lcd_touch_ft5x06.h"
 #include "esp_log.h"
 
+#include "driver/i2s_std.h"
+#include "esp_codec_dev.h"
+#include "esp_codec_dev_defaults.h"
+
 #define LCD_W 240
 #define LCD_H 320
 
@@ -39,6 +43,15 @@
 #define PIN_I2C_SDA  16
 #define PIN_TP_INT   17
 #define PIN_TP_RST   18
+
+#define PIN_I2S_MCLK 4
+#define PIN_I2S_BCLK 5
+#define PIN_I2S_WS   7
+#define PIN_I2S_DOUT 8
+#define PIN_I2S_DIN  6
+#define PIN_PA_EN    1            /* FM8002E, active low */
+
+#define AUDIO_RATE   16000
 
 static const char *TAG = "probe";
 
@@ -162,6 +175,117 @@ static void touch_init(i2c_master_bus_handle_t i2c)
 
 static uint16_t *fb;
 
+/* ── audio (M1b) ─────────────────────────────────────────────────────────── */
+static esp_codec_dev_handle_t s_codec;
+static i2s_chan_handle_t s_tx, s_rx;
+
+static void audio_init(i2c_master_bus_handle_t i2c)
+{
+    /* PA enable is driven by the codec's gpio_if (pa_pin + pa_reverted), but we
+     * also park it low up-front so the amp never pops on boot. */
+    gpio_config_t pa = {
+        .pin_bit_mask = 1ULL << PIN_PA_EN,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&pa));
+    gpio_set_level(PIN_PA_EN, 0);
+
+    i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    ESP_ERROR_CHECK(i2s_new_channel(&chan, &s_tx, &s_rx));
+
+    i2s_std_config_t std = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = PIN_I2S_MCLK,
+            .bclk = PIN_I2S_BCLK,
+            .ws = PIN_I2S_WS,
+            .dout = PIN_I2S_DOUT,
+            .din = PIN_I2S_DIN,
+            .invert_flags = {.mclk_inv = false, .bclk_inv = false, .ws_inv = false},
+        },
+    };
+    std.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_tx, &std));
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_rx, &std));
+    /* Do NOT enable the channels here: esp_codec_dev's I2S data_if reconfigures
+     * the slot and enables the channels inside esp_codec_dev_open(). Enabling
+     * first makes that reconfiguration fail with ESP_ERR_INVALID_ARG. */
+
+    audio_codec_i2c_cfg_t i2c_cfg = {
+        .addr = ES8311_CODEC_DEFAULT_ADDR,
+        .bus_handle = i2c,
+    };
+    const audio_codec_ctrl_if_t *ctrl = audio_codec_new_i2c_ctrl(&i2c_cfg);
+    audio_codec_i2s_cfg_t i2s_cfg = {
+        .port = I2S_NUM_0,
+        .rx_handle = s_rx,
+        .tx_handle = s_tx,
+    };
+    const audio_codec_data_if_t *data = audio_codec_new_i2s_data(&i2s_cfg);
+    const audio_codec_gpio_if_t *gpio_if = audio_codec_new_gpio();
+
+    es8311_codec_cfg_t es = {
+        .ctrl_if = ctrl,
+        .gpio_if = gpio_if,
+        .codec_mode = ESP_CODEC_DEV_WORK_MODE_BOTH,
+        .pa_pin = PIN_PA_EN,
+        .pa_reverted = true,            /* active low */
+        .master_mode = false,           /* ESP32 is the I2S master */
+        .use_mclk = true,
+        .hw_gain = {.pa_voltage = 5.0, .codec_dac_voltage = 3.3},
+    };
+    const audio_codec_if_t *codec = es8311_codec_new(&es);
+    if (!codec) {
+        ESP_LOGE(TAG, "es8311_codec_new failed");
+        return;
+    }
+    esp_codec_dev_cfg_t dev = {
+        .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,   /* without this esp_codec_dev_new() returns NULL */
+        .codec_if = codec,
+        .data_if = data,
+    };
+    s_codec = esp_codec_dev_new(&dev);
+    if (!s_codec) {
+        ESP_LOGE(TAG, "esp_codec_dev_new failed");
+        return;
+    }
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel = 1,
+        .sample_rate = AUDIO_RATE,
+        .mclk_multiple = 0,
+    };
+    esp_err_t err = esp_codec_dev_open(s_codec, &fs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "codec open failed: %s", esp_err_to_name(err));
+        return;
+    }
+    esp_codec_dev_set_out_vol(s_codec, 60);
+    esp_codec_dev_set_in_gain(s_codec, 30.0);
+    ESP_LOGI(TAG, "es8311 up (%d Hz mono, pa=%d active-low)", AUDIO_RATE, PIN_PA_EN);
+}
+
+/* 1 kHz sine, returned in 20 ms chunks so the caller can interleave with touch. */
+static void audio_tone(int16_t *buf, int samples, int *phase)
+{
+    for (int i = 0; i < samples; i++) {
+        /* sin via a small lookup: 32 steps per cycle is plenty for a beep */
+        static const int16_t sine[32] = {
+            0, 1275, 2508, 3671, 4723, 5638, 6382, 6924,
+            7233, 7278, 7066, 6612, 5927, 5038, 3976, 2759,
+            1437, 0, -1437, -2759, -3976, -5038, -5927, -6612,
+            -7066, -7278, -7233, -6924, -6382, -5638, -4723, -3671,
+        };
+        /* 1000 Hz at 16 kHz = 16 samples per cycle -> step through the table by 2 */
+        buf[i] = sine[(*phase >> 1) & 31];
+        *phase = (*phase + 2) & 63;
+    }
+}
+
 static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
     return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
@@ -220,8 +344,28 @@ void app_main(void)
     paint_bars();
     backlight_set(80);
 
+    audio_init(i2c);
+
     int hits = 0;
+    int phase = 0;
+    int16_t tone[320];                /* 20 ms @ 16 kHz */
+    int16_t mic[320];
+    int tick = 0;
     while (true) {
+        if (s_codec) {
+            audio_tone(tone, 320, &phase);
+            esp_codec_dev_write(s_codec, tone, sizeof(tone));
+            if (esp_codec_dev_read(s_codec, mic, sizeof(mic)) == ESP_OK) {
+                int64_t acc = 0;
+                for (int i = 0; i < 320; i++) {
+                    acc += (int32_t)mic[i] * mic[i];
+                }
+                int rms = (int)__builtin_sqrt((double)(acc / 320));
+                if ((tick++ % 25) == 0) {
+                    ESP_LOGI(TAG, "mic rms=%d", rms);
+                }
+            }
+        }
         esp_lcd_touch_read_data(tp);
         uint16_t x = 0, y = 0, strength = 0;
         uint8_t n = 1;
@@ -234,6 +378,6 @@ void app_main(void)
         if (hits > 0 && (hits % 32) == 0) {
             paint_bars();          /* wipe the scribble every 32 taps */
         }
-        vTaskDelay(pdMS_TO_TICKS(30));
+        vTaskDelay(pdMS_TO_TICKS(1));   /* esp_codec_dev_write already paces us */
     }
 }
