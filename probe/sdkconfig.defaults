@@ -44,3 +44,7 @@ CONFIG_OPUS_NONTHREADSAFE_PSEUDOSTACK=y
 CONFIG_OPUS_PSEUDOSTACK_SIZE=60000
 CONFIG_OPUS_STATE_PREFER_PSRAM=y
 CONFIG_OPUS_PSEUDOSTACK_PREFER_PSRAM=y
+
+# Internal RAM is the binding constraint with 4 TLS sockets: allow task stacks
+# and message-buffer storage to live in PSRAM (8 MB idle otherwise).
+# (PSRAM task stacks crashed on this board; left off)

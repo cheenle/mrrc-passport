@@ -31,6 +31,7 @@
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 
+#include "opus.h"
 #include "mrrc_link.h"
 #include "secrets.h"
 
@@ -181,13 +182,22 @@ static uint16_t *fb;
 /* ── audio (M1b) ─────────────────────────────────────────────────────────── */
 static esp_codec_dev_handle_t s_codec;
 
-/* Downlink sink: called from the WebSocket task with 16 kHz mono Int16. */
-static void on_downlink(const int16_t *pcm, int samples)
+/* Task stacks in PSRAM: with four TLS sockets the internal heap bottoms out
+ * around 4 KB, and any xTaskCreate() after that fails. */
+static TaskHandle_t task_with_psram_stack(TaskFunction_t fn, const char *name, uint32_t stack,
+                                         UBaseType_t prio, BaseType_t core)
 {
-    if (s_codec && samples > 0) {
-        esp_codec_dev_write(s_codec, (void *)pcm, samples * (int)sizeof(int16_t));
+    StaticTask_t *tcb = heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    StackType_t *stk = heap_caps_malloc(stack, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!tcb || !stk) {
+        ESP_LOGE("probe", "no memory for task %s", name);
+        return NULL;
     }
+    return xTaskCreateStaticPinnedToCore(fn, name, stack / sizeof(StackType_t), NULL, prio, stk, tcb, core);
 }
+
+static volatile bool s_ptt;
+static volatile uint32_t s_tx_frames;
 static i2s_chan_handle_t s_tx, s_rx;
 
 static void audio_init(i2c_master_bus_handle_t i2c)
@@ -280,23 +290,6 @@ static void audio_init(i2c_master_bus_handle_t i2c)
     ESP_LOGI(TAG, "es8311 up (%d Hz mono, pa=%d active-low)", AUDIO_RATE, PIN_PA_EN);
 }
 
-/* 1 kHz sine, returned in 20 ms chunks so the caller can interleave with touch. */
-static void audio_tone(int16_t *buf, int samples, int *phase)
-{
-    for (int i = 0; i < samples; i++) {
-        /* sin via a small lookup: 32 steps per cycle is plenty for a beep */
-        static const int16_t sine[32] = {
-            0, 1275, 2508, 3671, 4723, 5638, 6382, 6924,
-            7233, 7278, 7066, 6612, 5927, 5038, 3976, 2759,
-            1437, 0, -1437, -2759, -3976, -5038, -5927, -6612,
-            -7066, -7278, -7233, -6924, -6382, -5638, -4723, -3671,
-        };
-        /* 1000 Hz at 16 kHz = 16 samples per cycle -> step through the table by 2 */
-        buf[i] = sine[(*phase >> 1) & 31];
-        *phase = (*phase + 2) & 63;
-    }
-}
-
 static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
     return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
@@ -327,6 +320,99 @@ static void paint_dot(int cx, int cy)
     int x0 = cx - R < 0 ? 0 : cx - R;
     int y0 = cy - R < 0 ? 0 : cy - R;
     ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, x0, y0, x0 + R * 2, y0 + R * 2, &block[0][0]));
+}
+
+/* One task owns libopus in both directions: Xtensa GCC emits no .tbss, so
+ * micro-opus's "thread-safe" pseudostack is not per-thread and two callers
+ * corrupt it. PTT is half duplex, so serialising costs nothing. */
+static void audio_task(void *arg)
+{
+    (void)arg;
+    int err = 0;
+    OpusDecoder *dec = opus_decoder_create(16000, 1, &err);
+    if (err != OPUS_OK) { ESP_LOGE(TAG, "opus dec failed (%d)", err); dec = NULL; }
+    err = 0;
+    OpusEncoder *enc = opus_encoder_create(16000, 1, OPUS_APPLICATION_AUDIO, &err);
+    if (err != OPUS_OK) { ESP_LOGE(TAG, "opus enc failed (%d)", err); enc = NULL; }
+    if (enc) {
+        opus_encoder_ctl(enc, OPUS_SET_BITRATE(16000));
+        opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(0));
+        opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+        opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));
+        opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(10));
+    }
+    ESP_LOGI(TAG, "audio task: opus enc=%d dec=%d (16 kHz mono, 60 ms frames)",
+             enc != NULL, dec != NULL);
+
+    static int16_t mic[320];
+    static int16_t pcm[2880];
+    static uint8_t frame[2048];
+    static int16_t encbuf[960];
+    int encfill = 0;
+    bool tx_prev = false;
+
+    while (true) {
+        const bool tx = s_ptt && mrrc_link_up();
+
+        if (tx && !tx_prev) {
+            tx_prev = true;
+            /* Server keys the radio then reopens its TX stream (clearing the
+             * queue): do not race that. */
+            vTaskDelay(pdMS_TO_TICKS(200));
+            esp_codec_dev_read(s_codec, mic, sizeof mic);
+            while (mrrc_link_take_audio(frame, sizeof frame) > 0) { }
+            encfill = 0;
+        } else if (!tx) {
+            tx_prev = false;
+        }
+
+        if (esp_codec_dev_read(s_codec, mic, sizeof mic) != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        if (tx && enc) {
+            memcpy(encbuf + encfill, mic, sizeof mic);
+            encfill += 320;
+            if (encfill >= 960) {
+                int bytes = opus_encode(enc, encbuf, 960, frame + 1, (opus_int32)(sizeof frame - 1));
+                if (bytes > 0) {
+                    frame[0] = 0x01;
+                    if (mrrc_link_send_audio(frame, bytes + 1)) s_tx_frames++;
+                }
+                encfill = 0;
+            }
+        } else if (dec) {
+            int len;
+            while ((len = mrrc_link_take_audio(frame, sizeof frame)) > 0) {
+                int samples = 0;
+                if (frame[0] == 0x01) {
+                    samples = opus_decode(dec, frame + 1, len - 1, pcm, 2880, 0);
+                } else if (frame[0] == 0x00) {
+                    int n48 = (len - 1) / 2;
+                    samples = n48 / 3;
+                    const int16_t *in = (const int16_t *)(frame + 1);
+                    for (int i = 0; i < samples; i++) pcm[i] = in[i * 3];
+                }
+                if (samples > 0) {
+                    esp_codec_dev_write(s_codec, (void *)pcm, samples * (int)sizeof(int16_t));
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+}
+
+/* Keep the server's TX liveness gate fed while keyed. Independent task on
+ * purpose: the encode loop saturates core 0 and would starve anything parked
+ * on the main loop (handheld measured "TX dies at 5.6 s" from exactly that). */
+static void tx_hb_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        if (s_ptt) mrrc_link_send_ptt_heartbeat();
+        vTaskDelay(pdMS_TO_TICKS(1500));
+    }
 }
 
 void app_main(void)
@@ -364,37 +450,49 @@ void app_main(void)
         .port = PROBE_SERVER_PORT,
         .server_pass = PROBE_SERVER_PASS,
     };
-    mrrc_link_set_audio_sink(on_downlink);
+    /* BOOT (GPIO0) is the only physical key: long-press >= 600 ms keys the radio. */
+    gpio_config_t btn = {
+        .pin_bit_mask = 1ULL << 0,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&btn);
+
     mrrc_link_start(&cfg);
+    /* Stacks stay in internal RAM: PSRAM stacks crashed at boot on this board
+     * (i2s_channel_disable spam then a reset loop at ~945 ms). */
+    xTaskCreatePinnedToCore(audio_task, "audio", 10240, NULL, 7, NULL, 0);
+    xTaskCreatePinnedToCore(tx_hb_task, "txhb", 2560, NULL, 10, NULL, 1);
 
     int hits = 0;
-    int phase = 0;
-    int16_t tone[320];                /* 20 ms @ 16 kHz */
-    int16_t mic[320];
     int tick = 0;
+    int held_ms = 0;
     while (true) {
-        if (s_codec) {
-            (void)phase; (void)tone;
-            if (esp_codec_dev_read(s_codec, mic, sizeof(mic)) == ESP_OK) {
-                int64_t acc = 0;
-                for (int i = 0; i < 320; i++) {
-                    acc += (int32_t)mic[i] * mic[i];
-                }
-                int rms = (int)__builtin_sqrt((double)(acc / 320));
-                if ((tick++ % 25) == 0) {
-                    ESP_LOGI(TAG, "mic rms=%d", rms);
-                }
+        /* BOOT key: 600 ms to key, release to unkey. A short tap never keys. */
+        const int lvl = gpio_get_level(0);
+        if (lvl == 0) {
+            held_ms += 50;
+            if (held_ms >= 600 && !s_ptt) {
+                s_ptt = true;
+                mrrc_link_set_ptt(true);
             }
+        } else {
+            if (s_ptt) {
+                s_ptt = false;
+                mrrc_link_set_ptt(false);
+            }
+            held_ms = 0;
         }
 
-        /* M2a: what the wire says. Once a second is plenty and stays readable
-         * next to the 1 kHz beep. */
-        if ((tick % 50) == 0) {
+        if ((tick++ % 20) == 0) {
             const mrrc_state_t *st = mrrc_state();
-            ESP_LOGI(TAG, "link: up=%d %ldHz %s %s state=%lu spec=%lu audio=%lu drop=%lu",
+            ESP_LOGI(TAG, "link: up=%d %ldHz %s %s state=%lu spec=%lu audio=%lu drop=%lu ptt=%d tx=%lu",
                      (int)st->up, (long)st->freq_hz, st->mode, st->band,
                      (unsigned long)st->state_updates, (unsigned long)st->spectrum_frames,
-                     (unsigned long)st->audio_frames, (unsigned long)st->audio_drops);
+                     (unsigned long)st->audio_frames, (unsigned long)st->audio_drops,
+                     (int)s_ptt, (unsigned long)s_tx_frames);
         }
         esp_lcd_touch_read_data(tp);
         uint16_t x = 0, y = 0, strength = 0;
@@ -408,6 +506,6 @@ void app_main(void)
         if (hits > 0 && (hits % 32) == 0) {
             paint_bars();          /* wipe the scribble every 32 taps */
         }
-        vTaskDelay(pdMS_TO_TICKS(1));   /* esp_codec_dev_write already paces us */
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }

@@ -26,9 +26,13 @@ typedef struct {
     uint32_t spectrum_bytes;
 } mrrc_state_t;
 
-/* Decoded downlink, 16 kHz mono Int16. Called from the WebSocket task. */
-typedef void (*mrrc_audio_sink_t)(const int16_t *pcm, int samples);
-void mrrc_link_set_audio_sink(mrrc_audio_sink_t fn);
+/* Downlink audio frames (still encoded, tag byte first) land in a message
+ * buffer; the caller decodes them on its own audio task so that exactly one
+ * task ever calls libopus. */
+int  mrrc_link_take_audio(uint8_t *buf, int max);     /* 0 = nothing pending */
+bool mrrc_link_send_audio(const uint8_t *data, int len);
+void mrrc_link_set_ptt(bool on);
+void mrrc_link_send_ptt_heartbeat(void);
 
 void mrrc_link_start(const mrrc_cfg_t *cfg);
 bool mrrc_link_up(void);

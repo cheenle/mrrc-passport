@@ -25,9 +25,11 @@
 #include "esp_websocket_client.h"
 #include "nvs_flash.h"
 #include "cJSON.h"
+#include "esp_heap_caps.h"
+#include "freertos/task.h"
 
 #include "mrrc_link.h"
-#include "opus.h"
+#include "freertos/message_buffer.h"
 
 #define WIFI_BIT  BIT0
 #define WS_BUF    8192
@@ -41,11 +43,10 @@ static mrrc_state_t s_st;
 static EventGroupHandle_t s_net_ev;
 static char s_token[TOKEN_MAX];
 static char s_auth_hdr[TOKEN_MAX + 32];
-static esp_websocket_client_handle_t s_ctrl, s_spec, s_arx;
+static esp_websocket_client_handle_t s_ctrl, s_spec, s_arx, s_atx;
+static MessageBufferHandle_t s_abuf;      /* encoded downlink frames */
 static char s_acc[FRAME_MAX];
 static size_t s_acc_len;
-static mrrc_audio_sink_t s_sink;
-static OpusDecoder *s_dec;               /* single task: only the WS task touches it */
 
 bool mrrc_link_up(void) { return s_st.up; }
 const mrrc_state_t *mrrc_state(void) { return &s_st; }
@@ -117,49 +118,46 @@ static void handle_ctrl_text(const char *payload, int len)
 
 /* ── websocket plumbing ──────────────────────────────────────────────────── */
 
-void mrrc_link_set_audio_sink(mrrc_audio_sink_t fn)
+int mrrc_link_take_audio(uint8_t *buf, int max)
 {
-    s_sink = fn;
-    if (!s_dec) {
-        int err = 0;
-        /* 16 kHz out: the ES8311 on this board must not be run at 48 kHz for
-         * capture, so the whole chain stays at one rate. The server sends
-         * 48 kHz Opus; a 16 kHz decoder resamples it for us. */
-        s_dec = opus_decoder_create(16000, 1, &err);
-        if (err != OPUS_OK || !s_dec) {
-            ESP_LOGE(TAG, "opus decoder create failed (%d)", err);
-            s_dec = NULL;
-        } else {
-            ESP_LOGI(TAG, "opus decoder ready (16 kHz mono)");
-        }
+    if (!s_abuf) return 0;
+    return (int)xMessageBufferReceive(s_abuf, buf, (size_t)max, 0);
+}
+
+bool mrrc_link_send_audio(const uint8_t *data, int len)
+{
+    if (!s_atx || !esp_websocket_client_is_connected(s_atx)) return false;
+    return esp_websocket_client_send_bin(s_atx, (const char *)data, len, pdMS_TO_TICKS(200)) >= 0;
+}
+
+void mrrc_link_send_ptt_heartbeat(void)
+{
+    if (!s_ctrl || !esp_websocket_client_is_connected(s_ctrl)) return;
+    static const char hb[] = "{\"type\":\"txhb\"}";
+    esp_websocket_client_send_text(s_ctrl, hb, (int)strlen(hb), pdMS_TO_TICKS(200));
+}
+
+void mrrc_link_set_ptt(bool on)
+{
+    if (!s_ctrl || !esp_websocket_client_is_connected(s_ctrl)) return;
+    char b[64];
+    snprintf(b, sizeof b, "{\"type\":\"set\",\"field\":\"ptt\",\"value\":%s}", on ? "true" : "false");
+    esp_websocket_client_send_text(s_ctrl, b, (int)strlen(b), pdMS_TO_TICKS(500));
+    if (!on) {
+        /* "s:" stops the server's capture; send it *before* ptt:false so the
+         * tail of the last frame is not chopped. */
+        esp_websocket_client_send_text(s_ctrl, "s:", 2, pdMS_TO_TICKS(500));
     }
+    ESP_LOGI(TAG, "ptt %s", on ? "on" : "off");
 }
 
 static void audio_frame(const uint8_t *data, int len)
 {
-    if (len < 2 || !s_sink) return;
-    const uint8_t tag = data[0];
+    if (len < 2) return;
     s_st.audio_frames++;
-
-    static int16_t pcm[2880];            /* 60 ms @ 48 kHz, the largest frame */
-    int samples = 0;
-    if (tag == 0x01 && s_dec) {
-        samples = opus_decode(s_dec, data + 1, len - 1, pcm, 2880, 0);
-        if (samples < 0) {
-            s_st.audio_drops++;
-            return;
-        }
-    } else if (tag == 0x00) {
-        /* Raw 48 kHz PCM: decimate 3:1 to the codec's 16 kHz. */
-        int n48 = (len - 1) / 2;
-        samples = n48 / 3;
-        const int16_t *in = (const int16_t *)(data + 1);
-        for (int i = 0; i < samples; i++) pcm[i] = in[i * 3];
-    } else {
+    if (s_abuf && xMessageBufferSend(s_abuf, data, (size_t)len, 0) != (size_t)len) {
         s_st.audio_drops++;
-        return;
     }
-    if (samples > 0) s_sink(pcm, samples);
 }
 
 static void spec_frame(const uint8_t *data, int len)
@@ -239,7 +237,11 @@ static void ws_open(esp_websocket_client_handle_t *out, const char *path, bool s
     esp_websocket_client_config_t cfg = {
         .uri = uri,
         .headers = s_auth_hdr,
-        .buffer_size = WS_BUF,
+        /* Four sockets on one chip: keep each client's footprint small. 4 KB
+         * still carries an 851 B spectrum frame and a 200 B Opus frame; a
+         * 5.5 KB fullState simply arrives as two fragments (we accumulate). */
+        .buffer_size = 2048,
+        .task_stack = 3072,
         .reconnect_timeout_ms = 3000,
         .network_timeout_ms = 10000,
         .ping_interval_sec = 15,
@@ -365,6 +367,20 @@ static void link_task(void *arg)
             ws_open(&s_ctrl, "/WSradio", false);
             ws_open(&s_spec, "/WSspectrum", true);
             ws_open(&s_arx, "/WSaudioRX", false);
+            ws_open(&s_atx, "/WSaudioTX", false);
+            ESP_LOGI(TAG, "heap after 4 sockets: internal free=%u largest=%u psram free=%u",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+            if (!s_abuf) {
+                /* Storage in PSRAM: 16 KB of internal RAM is exactly what we
+                 * do not have once four sockets are up. */
+                StaticMessageBuffer_t *sb = heap_caps_malloc(sizeof(StaticMessageBuffer_t),
+                                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                uint8_t *store = heap_caps_malloc(16 * 1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                s_abuf = (sb && store) ? xMessageBufferCreateStatic(16 * 1024, store, sb)
+                                       : xMessageBufferCreate(4 * 1024);
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
@@ -374,5 +390,5 @@ void mrrc_link_start(const mrrc_cfg_t *cfg)
 {
     s_cfg = *cfg;
     memset(&s_st, 0, sizeof s_st);
-    xTaskCreatePinnedToCore(link_task, "mrrc_link", 8192, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(link_task, "mrrc_link", 7168, NULL, 5, NULL, 1);
 }
