@@ -137,6 +137,44 @@ per-thread；两个任务同时进 libopus 会踩坏 `global_stack/scratch_ptr`�
 
 ## 6. 网络与协议
 
+### 6.0 单连接 `/WSterminal`（2026-11-19 实测修正）
+
+原设计照 handheld 开四条独立 WebSocket（`/WSradio` `/WSpectrum` `/WSaudioRX`
+`/WSaudioTX`）+ Opus。**真机否掉了它**：
+
+| 观察 | 数值 |
+|---|---|
+| 四条连接时的内部 RAM | `free=2451 B, largest=2048 B` |
+| 第四条 socket 的任务 | `websocket_client: Error create websocket task` |
+| mbedtls 记录缓冲压到 4 KB | `/WSradio` 报 `-0x7100`（`fullState` 是 5.5 KB，一条 TLS 记录装不下） |
+| 任务栈放 PSRAM | 启动即崩（`i2s_channel_disable` 刷屏后在 945 ms 复位循环） |
+| 改回单连接后 | `free=15799 B, largest=8704 B`，控制/频谱/音频全在一条上跑通 |
+
+**结论**：passport 的单连接不是"因为 C3 穷"的妥协，而是这个量级（400–512 KB
+内部 RAM）唯一装得下的形态。本项目因此**回到 `/WSterminal` + PCM16**，不开 Opus。
+
+### 6.1 `/WSterminal` 帧格式
+
+```
+上行  [0x01][0x02][PCM16 16kHz mono]      channel=TX audio, tag=pcm16
+下行  [0x00][tag][payload]                channel=RX audio, tag: 0x02=pcm16 / 0x00=pcm48
+频谱  [0x02][850 bins]                    channel=spectrum
+```
+
+**channel 字节不能少**：少了它，服务端会把 codec tag `0x02` 当成频谱通道，PCM 被
+直接丢弃 —— 电台键控了却没有任何信号，ATR-1000 报 `TX silence` 后自行退出，
+表现就是"发射没功率"（2026-11-19 实测踩到）。
+
+握手：连接后立刻发
+`{"type":"audioCaps","profile":"pcm16"}`（服务端回 `accepted:true, rate:16000`）
+与 `{"type":"spectrumCaps","profile":"mid"}`。
+
+### 6.2 半双工
+
+发射期间必须 `esp_codec_dev_set_out_mute(true)`，并把下行队列**排空丢弃**：
+否则自己的上行经服务端回灌就是啸叫，且退出发射后会重放堆积的旧音频。
+
+
 复用 passport 的 `mrrc_net.c` 结构（登录 → `/WSradio` / `/WSspectrum` / `/WSaudio*`），
 从 handheld 移植 Opus 编解码与频谱降采样：
 

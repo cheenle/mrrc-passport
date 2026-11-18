@@ -31,7 +31,6 @@
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 
-#include "opus.h"
 #include "mrrc_link.h"
 #include "secrets.h"
 
@@ -322,48 +321,37 @@ static void paint_dot(int cx, int cy)
     ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, x0, y0, x0 + R * 2, y0 + R * 2, &block[0][0]));
 }
 
-/* One task owns libopus in both directions: Xtensa GCC emits no .tbss, so
- * micro-opus's "thread-safe" pseudostack is not per-thread and two callers
- * corrupt it. PTT is half duplex, so serialising costs nothing. */
+/* Single audio task: reads the mic, keys the uplink when PTT is on, and plays
+ * whatever the socket queued. PCM16 both ways — no codec on the wire, so
+ * nothing here touches libopus and the whole thread-safety trap disappears. */
 static void audio_task(void *arg)
 {
     (void)arg;
-    int err = 0;
-    OpusDecoder *dec = opus_decoder_create(16000, 1, &err);
-    if (err != OPUS_OK) { ESP_LOGE(TAG, "opus dec failed (%d)", err); dec = NULL; }
-    err = 0;
-    OpusEncoder *enc = opus_encoder_create(16000, 1, OPUS_APPLICATION_AUDIO, &err);
-    if (err != OPUS_OK) { ESP_LOGE(TAG, "opus enc failed (%d)", err); enc = NULL; }
-    if (enc) {
-        opus_encoder_ctl(enc, OPUS_SET_BITRATE(16000));
-        opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(0));
-        opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
-        opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));
-        opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(10));
-    }
-    ESP_LOGI(TAG, "audio task: opus enc=%d dec=%d (16 kHz mono, 60 ms frames)",
-             enc != NULL, dec != NULL);
-
-    static int16_t mic[320];
+    static int16_t mic[320];          /* 20 ms @ 16 kHz */
     static int16_t pcm[2880];
     static uint8_t frame[2048];
-    static int16_t encbuf[960];
-    int encfill = 0;
     bool tx_prev = false;
+
+    ESP_LOGI(TAG, "audio task up (PCM16 16 kHz both ways, 20 ms frames)");
 
     while (true) {
         const bool tx = s_ptt && mrrc_link_up();
 
         if (tx && !tx_prev) {
             tx_prev = true;
-            /* Server keys the radio then reopens its TX stream (clearing the
-             * queue): do not race that. */
+            /* Half duplex: feeding our own uplink back through the speaker is a
+             * howl, not audio. Mute the amp for the whole transmission. */
+            esp_codec_dev_set_out_mute(s_codec, true);
+            /* Server keys the radio then reopens its TX stream: let that land
+             * before we push samples, and drop whatever was captured during it. */
             vTaskDelay(pdMS_TO_TICKS(200));
             esp_codec_dev_read(s_codec, mic, sizeof mic);
             while (mrrc_link_take_audio(frame, sizeof frame) > 0) { }
-            encfill = 0;
-        } else if (!tx) {
+        } else if (!tx && tx_prev) {
             tx_prev = false;
+            /* Drop the downlink that piled up while we were keyed, then unmute. */
+            while (mrrc_link_take_audio(frame, sizeof frame) > 0) { }
+            esp_codec_dev_set_out_mute(s_codec, false);
         }
 
         if (esp_codec_dev_read(s_codec, mic, sizeof mic) != ESP_OK) {
@@ -371,31 +359,22 @@ static void audio_task(void *arg)
             continue;
         }
 
-        if (tx && enc) {
-            memcpy(encbuf + encfill, mic, sizeof mic);
-            encfill += 320;
-            if (encfill >= 960) {
-                int bytes = opus_encode(enc, encbuf, 960, frame + 1, (opus_int32)(sizeof frame - 1));
-                if (bytes > 0) {
-                    frame[0] = 0x01;
-                    if (mrrc_link_send_audio(frame, bytes + 1)) s_tx_frames++;
-                }
-                encfill = 0;
-            }
-        } else if (dec) {
+        if (tx) {
+            if (mrrc_link_send_pcm(mic, 320)) s_tx_frames++;
+            /* Keep the queue drained so the backlog cannot overflow (drop=25
+             * earlier) and so release does not replay stale audio. */
+            while (mrrc_link_take_audio(frame, sizeof frame) > 0) { }
+        } else {
             int len;
             while ((len = mrrc_link_take_audio(frame, sizeof frame)) > 0) {
-                int samples = 0;
-                if (frame[0] == 0x01) {
-                    samples = opus_decode(dec, frame + 1, len - 1, pcm, 2880, 0);
-                } else if (frame[0] == 0x00) {
-                    int n48 = (len - 1) / 2;
-                    samples = n48 / 3;
-                    const int16_t *in = (const int16_t *)(frame + 1);
+                const int16_t *in = (const int16_t *)(frame + 2);
+                if (frame[1] == 0x02) {                   /* pcm16 @ 16 kHz */
+                    int samples = (len - 2) / 2;
+                    if (samples > 0) esp_codec_dev_write(s_codec, (void *)in, samples * 2);
+                } else if (frame[1] == 0x00) {            /* pcm48 -> 16 kHz */
+                    int samples = ((len - 2) / 2) / 3;
                     for (int i = 0; i < samples; i++) pcm[i] = in[i * 3];
-                }
-                if (samples > 0) {
-                    esp_codec_dev_write(s_codec, (void *)pcm, samples * (int)sizeof(int16_t));
+                    if (samples > 0) esp_codec_dev_write(s_codec, (void *)pcm, samples * 2);
                 }
             }
         }

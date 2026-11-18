@@ -1,14 +1,14 @@
 /*
- * M2a — the smallest MRRC client that proves the wire: Wi-Fi → login →
- * /WSradio (JSON state) → /WSpectrum (binary 850 bins).
+ * M2 — the MRRC client, passport-shaped: ONE /WSterminal socket carries
+ * control (JSON), spectrum (chan 0x02) and both audio directions
+ * (chan 0x00 down, 0x01 up). PCM16 at 16 kHz, no codec on the wire.
  *
- * Deliberately narrower than passport's mrrc_net.c:
- *   - no token persistence (probe reboots often, one login per boot)
- *   - no PTT, no audio, no channel table (M2b/M5)
- *   - only the fields the probe actually prints
- * Everything here is lifted from passport's mrrc_net.c, including the two
- * non-obvious bits: the token rides in the query string (?token=), and the box
- * serves a self-signed certificate, so chain validation must be off.
+ * Why not Opus / four sockets (measured on this board, 2026-11-19):
+ *   /WSradio + /WSspectrum + /WSaudioRX + /WSaudioTX leaves the internal heap
+ *   at ~2.4 KB (largest block 2048) and the fourth socket's task cannot be
+ *   created; shrinking the mbedtls record buffers to 4 KB breaks /WSradio
+ *   with -0x7100 because a fullState frame is 5.5 KB. PSRAM task stacks crash
+ *   at boot here. passport's single socket is the design that fits.
  */
 #include <string.h>
 #include <stdio.h>
@@ -16,8 +16,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/message_buffer.h"
 
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -25,33 +27,49 @@
 #include "esp_websocket_client.h"
 #include "nvs_flash.h"
 #include "cJSON.h"
-#include "esp_heap_caps.h"
-#include "freertos/task.h"
 
 #include "mrrc_link.h"
-#include "freertos/message_buffer.h"
 
-#define WIFI_BIT  BIT0
-#define WS_BUF    8192
-#define FRAME_MAX 8192
-#define TOKEN_MAX 160
+#define WIFI_BIT   BIT0
+#define WS_BUF     4096
+#define FRAME_MAX  8192
+#define TOKEN_MAX  160
 
-static const char *TAG = "m2a";
+/* /WSterminal channel byte (server: TERMINAL_CHAN_*) */
+#define CH_RX_AUDIO 0x00
+#define CH_TX_AUDIO 0x01
+#define CH_SPECTRUM 0x02
+
+/* audio payload tag (server: AUDIO_TAG_*) */
+#define TAG_PCM48  0x00
+#define TAG_OPUS   0x01
+#define TAG_PCM16  0x02
+
+static const char *TAG = "m2";
 
 static mrrc_cfg_t s_cfg;
 static mrrc_state_t s_st;
 static EventGroupHandle_t s_net_ev;
 static char s_token[TOKEN_MAX];
 static char s_auth_hdr[TOKEN_MAX + 32];
-static esp_websocket_client_handle_t s_ctrl, s_spec, s_arx, s_atx;
-static MessageBufferHandle_t s_abuf;      /* encoded downlink frames */
+static esp_websocket_client_handle_t s_ws;
+static MessageBufferHandle_t s_abuf;
 static char s_acc[FRAME_MAX];
 static size_t s_acc_len;
+static uint8_t s_spec[1024];
+static int s_spec_len;
 
 bool mrrc_link_up(void) { return s_st.up; }
 const mrrc_state_t *mrrc_state(void) { return &s_st; }
 
-/* ── /WSradio payload ────────────────────────────────────────────────────── */
+int mrrc_link_spectrum(uint8_t *out, int max)
+{
+    int n = s_spec_len < max ? s_spec_len : max;
+    if (n > 0) memcpy(out, s_spec, (size_t)n);
+    return n;
+}
+
+/* ── JSON state ─────────────────────────────────────────────────────────── */
 
 static void apply_field(const char *k, const cJSON *v)
 {
@@ -76,18 +94,17 @@ static void apply_object(const cJSON *obj)
 {
     const cJSON *it = NULL;
     cJSON_ArrayForEach(it, obj) {
-        if (cJSON_IsString(it) || cJSON_IsNumber(it) || cJSON_IsBool(it)) {
+        if (it->string && (cJSON_IsString(it) || cJSON_IsNumber(it) || cJSON_IsBool(it))) {
             apply_field(it->string, it);
         }
     }
 }
 
-static void handle_ctrl_text(const char *payload, int len)
+static void handle_text(const char *payload, int len)
 {
     if (len <= 0) return;
     cJSON *root = cJSON_ParseWithLength(payload, len);
     if (!root) return;
-
     const cJSON *type = cJSON_GetObjectItem(root, "type");
     const char *t = cJSON_IsString(type) ? type->valuestring : "";
 
@@ -99,16 +116,23 @@ static void handle_ctrl_text(const char *payload, int len)
                  (long)s_st.freq_hz, s_st.mode, s_st.band, s_st.scope_span,
                  (int)s_st.serial_connected);
     } else if (!strcmp(t, "stateUpdate") || !strcmp(t, "value")) {
-        const cJSON *data = cJSON_GetObjectItem(root, "data");
-        if (cJSON_IsObject(data)) {
-            apply_object(data);
+        const cJSON *f = cJSON_GetObjectItem(root, "field");
+        const cJSON *v = cJSON_GetObjectItem(root, "value");
+        if (cJSON_IsString(f) && v) {
+            apply_field(f->valuestring, v);
         } else {
-            /* "value" carries field+value directly */
-            const cJSON *f = cJSON_GetObjectItem(root, "field");
-            const cJSON *v = cJSON_GetObjectItem(root, "value");
-            if (cJSON_IsString(f) && v) apply_field(f->valuestring, v);
+            const cJSON *data = cJSON_GetObjectItem(root, "data");
+            if (cJSON_IsObject(data)) apply_object(data);
         }
         s_st.state_updates++;
+    } else if (!strcmp(t, "audioCaps")) {
+        const cJSON *acc = cJSON_GetObjectItem(root, "accepted");
+        const cJSON *rate = cJSON_GetObjectItem(root, "rate");
+        ESP_LOGI(TAG, "audioCaps accepted=%d rate=%d",
+                 cJSON_IsTrue(acc), cJSON_IsNumber(rate) ? (int)rate->valuedouble : -1);
+    } else if (!strcmp(t, "spectrumCaps")) {
+        const cJSON *acc = cJSON_GetObjectItem(root, "accepted");
+        ESP_LOGI(TAG, "spectrumCaps accepted=%d", cJSON_IsTrue(acc));
     } else if (!strcmp(t, "error")) {
         const cJSON *m = cJSON_GetObjectItem(root, "message");
         ESP_LOGW(TAG, "server error: %s", cJSON_IsString(m) ? m->valuestring : "?");
@@ -116,7 +140,113 @@ static void handle_ctrl_text(const char *payload, int len)
     cJSON_Delete(root);
 }
 
-/* ── websocket plumbing ──────────────────────────────────────────────────── */
+/* ── binary frames: [chan][tag][payload] ────────────────────────────────── */
+
+static void handle_bin(const uint8_t *data, int len)
+{
+    if (len < 2) return;
+    const uint8_t chan = data[0];
+
+    if (chan == CH_SPECTRUM) {
+        s_st.spectrum_frames++;
+        s_spec_len = len - 1 < (int)sizeof s_spec ? len - 1 : (int)sizeof s_spec;
+        memcpy(s_spec, data + 1, (size_t)s_spec_len);
+        return;
+    }
+    if (chan != CH_RX_AUDIO) return;
+
+    /* Only audio reaches the queue; the audio task owns playback. Dropping the
+     * Opus tag here is deliberate: this build declares pcm16 and there is no
+     * decoder linked, so an Opus frame would be noise. */
+    const uint8_t tag = data[1];
+    if (tag != TAG_PCM16 && tag != TAG_PCM48) {
+        s_st.audio_drops++;
+        return;
+    }
+    s_st.audio_frames++;
+    if (!s_abuf || xMessageBufferSend(s_abuf, data, (size_t)len, 0) != (size_t)len) {
+        s_st.audio_drops++;
+    }
+}
+
+static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    esp_websocket_event_data_t *ev = (esp_websocket_event_data_t *)data;
+
+    switch (id) {
+    case WEBSOCKET_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "/WSterminal connected");
+        {
+            static const char ac[] = "{\"type\":\"audioCaps\",\"profile\":\"pcm16\"}";
+            static const char sc[] = "{\"type\":\"spectrumCaps\",\"profile\":\"mid\"}";
+            esp_websocket_client_send_text(s_ws, ac, (int)strlen(ac), pdMS_TO_TICKS(1000));
+            esp_websocket_client_send_text(s_ws, sc, (int)strlen(sc), pdMS_TO_TICKS(1000));
+        }
+        s_st.up = true;
+        break;
+    case WEBSOCKET_EVENT_DISCONNECTED:
+        ESP_LOGW(TAG, "/WSterminal disconnected");
+        s_st.up = false;
+        break;
+    case WEBSOCKET_EVENT_DATA:
+        if (ev->op_code == 0x08) break;
+        if (ev->op_code == 0x02) {
+            handle_bin((const uint8_t *)ev->data_ptr, ev->data_len);
+        } else if (ev->op_code == 0x01) {
+            if (s_acc_len + ev->data_len < sizeof s_acc) {
+                memcpy(s_acc + s_acc_len, ev->data_ptr, ev->data_len);
+                s_acc_len += ev->data_len;
+            }
+            if (ev->payload_offset + ev->data_len >= ev->payload_len) {
+                handle_text(s_acc, (int)s_acc_len);
+                s_acc_len = 0;
+            }
+        }
+        break;
+    case WEBSOCKET_EVENT_ERROR:
+        ESP_LOGE(TAG, "/WSterminal error");
+        break;
+    }
+}
+
+/* ── uplink + PTT ───────────────────────────────────────────────────────── */
+
+static bool send_bin(const uint8_t *data, int len)
+{
+    if (!s_ws || !esp_websocket_client_is_connected(s_ws)) return false;
+    return esp_websocket_client_send_bin(s_ws, (const char *)data, len, pdMS_TO_TICKS(200)) >= 0;
+}
+
+bool mrrc_link_send_pcm(const int16_t *pcm, int samples)
+{
+    static uint8_t frame[64 + 960 * 2];
+    if (samples <= 0 || samples > 960) return false;
+    frame[0] = CH_TX_AUDIO;
+    frame[1] = TAG_PCM16;                 /* 16 kHz Int16, the server resamples */
+    memcpy(frame + 2, pcm, (size_t)samples * 2);
+    return send_bin(frame, 2 + samples * 2);
+}
+
+void mrrc_link_send_ptt_heartbeat(void)
+{
+    static const char hb[] = "{\"type\":\"txhb\"}";
+    if (s_ws && esp_websocket_client_is_connected(s_ws)) {
+        esp_websocket_client_send_text(s_ws, hb, (int)strlen(hb), pdMS_TO_TICKS(200));
+    }
+}
+
+void mrrc_link_set_ptt(bool on)
+{
+    if (!s_ws || !esp_websocket_client_is_connected(s_ws)) return;
+    char b[64];
+    snprintf(b, sizeof b, "{\"type\":\"set\",\"field\":\"ptt\",\"value\":%s}", on ? "true" : "false");
+    if (!on) {
+        /* Stop capture first so the tail of our last frame is not chopped. */
+        esp_websocket_client_send_text(s_ws, "s:", 2, pdMS_TO_TICKS(500));
+    }
+    esp_websocket_client_send_text(s_ws, b, (int)strlen(b), pdMS_TO_TICKS(500));
+    ESP_LOGI(TAG, "ptt %s", on ? "on" : "off");
+}
 
 int mrrc_link_take_audio(uint8_t *buf, int max)
 {
@@ -124,141 +254,7 @@ int mrrc_link_take_audio(uint8_t *buf, int max)
     return (int)xMessageBufferReceive(s_abuf, buf, (size_t)max, 0);
 }
 
-bool mrrc_link_send_audio(const uint8_t *data, int len)
-{
-    if (!s_atx || !esp_websocket_client_is_connected(s_atx)) return false;
-    return esp_websocket_client_send_bin(s_atx, (const char *)data, len, pdMS_TO_TICKS(200)) >= 0;
-}
-
-void mrrc_link_send_ptt_heartbeat(void)
-{
-    if (!s_ctrl || !esp_websocket_client_is_connected(s_ctrl)) return;
-    static const char hb[] = "{\"type\":\"txhb\"}";
-    esp_websocket_client_send_text(s_ctrl, hb, (int)strlen(hb), pdMS_TO_TICKS(200));
-}
-
-void mrrc_link_set_ptt(bool on)
-{
-    if (!s_ctrl || !esp_websocket_client_is_connected(s_ctrl)) return;
-    char b[64];
-    snprintf(b, sizeof b, "{\"type\":\"set\",\"field\":\"ptt\",\"value\":%s}", on ? "true" : "false");
-    esp_websocket_client_send_text(s_ctrl, b, (int)strlen(b), pdMS_TO_TICKS(500));
-    if (!on) {
-        /* "s:" stops the server's capture; send it *before* ptt:false so the
-         * tail of the last frame is not chopped. */
-        esp_websocket_client_send_text(s_ctrl, "s:", 2, pdMS_TO_TICKS(500));
-    }
-    ESP_LOGI(TAG, "ptt %s", on ? "on" : "off");
-}
-
-static void audio_frame(const uint8_t *data, int len)
-{
-    if (len < 2) return;
-    s_st.audio_frames++;
-    if (s_abuf && xMessageBufferSend(s_abuf, data, (size_t)len, 0) != (size_t)len) {
-        s_st.audio_drops++;
-    }
-}
-
-static void spec_frame(const uint8_t *data, int len)
-{
-    if (len < 2) return;
-    /* First byte is the frame kind (0x01 = waterfall row). Payload is 850
-     * bins, optionally doubled when the server sends two rows in one frame. */
-    s_st.spectrum_frames++;
-    s_st.spectrum_bytes += (uint32_t)len;
-    if ((s_st.spectrum_frames % 50) == 1) {
-        uint32_t sum = 0;
-        for (int i = 1; i < len; i++) sum += data[i];
-        ESP_LOGI(TAG, "spectrum #%lu len=%d kind=0x%02x mean=%lu",
-                 (unsigned long)s_st.spectrum_frames, len, data[0],
-                 (unsigned long)(sum / (uint32_t)(len - 1)));
-    }
-}
-
-static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
-{
-    esp_websocket_event_data_t *ev = (esp_websocket_event_data_t *)data;
-    const bool is_spec = (ev->client == s_spec);
-    const bool is_arx = (ev->client == s_arx);
-
-    switch (id) {
-    case WEBSOCKET_EVENT_CONNECTED:
-        if (is_spec) {
-            ESP_LOGI(TAG, "/WSspectrum connected");
-            /* Declaring "mid" halves the frame: 851 B instead of 1701 B. */
-            static const char caps[] = "{\"type\":\"spectrumCaps\",\"profile\":\"mid\"}";
-            esp_websocket_client_send_text(s_spec, caps, (int)strlen(caps), pdMS_TO_TICKS(1000));
-        } else if (is_arx) {
-            ESP_LOGI(TAG, "/WSaudioRX connected");
-        } else {
-            ESP_LOGI(TAG, "/WSradio connected");
-            s_st.up = true;
-        }
-        break;
-    case WEBSOCKET_EVENT_DISCONNECTED:
-        if (!is_spec && !is_arx) s_st.up = false;
-        ESP_LOGW(TAG, "%s disconnected", is_spec ? "spec" : (is_arx ? "audioRX" : "radio"));
-        break;
-    case WEBSOCKET_EVENT_DATA:
-        if (ev->op_code == 0x08) break;            /* close frame */
-        if (is_spec) {
-            spec_frame((const uint8_t *)ev->data_ptr, ev->data_len);
-            break;
-        }
-        if (is_arx) {
-            if (ev->op_code == 0x02) audio_frame((const uint8_t *)ev->data_ptr, ev->data_len);
-            break;
-        }
-        /* Text arrives fragmented on a 5.5 KB fullState: accumulate until the
-         * final frame (payload_offset + data_len reaches payload_len). */
-        if (ev->op_code == 0x01) {
-            if (s_acc_len + ev->data_len < sizeof s_acc) {
-                memcpy(s_acc + s_acc_len, ev->data_ptr, ev->data_len);
-                s_acc_len += ev->data_len;
-            }
-            if (ev->payload_offset + ev->data_len >= ev->payload_len) {
-                handle_ctrl_text(s_acc, (int)s_acc_len);
-                s_acc_len = 0;
-            }
-        }
-        break;
-    case WEBSOCKET_EVENT_ERROR:
-        ESP_LOGE(TAG, "%s error", is_spec ? "spec" : "radio");
-        break;
-    }
-}
-
-static void ws_open(esp_websocket_client_handle_t *out, const char *path, bool spec)
-{
-    char uri[320];
-    snprintf(uri, sizeof uri, "wss://%s:%d%s?token=%s", s_cfg.host, s_cfg.port, path, s_token);
-
-    esp_websocket_client_config_t cfg = {
-        .uri = uri,
-        .headers = s_auth_hdr,
-        /* Four sockets on one chip: keep each client's footprint small. 4 KB
-         * still carries an 851 B spectrum frame and a 200 B Opus frame; a
-         * 5.5 KB fullState simply arrives as two fragments (we accumulate). */
-        .buffer_size = 2048,
-        .task_stack = 3072,
-        .reconnect_timeout_ms = 3000,
-        .network_timeout_ms = 10000,
-        .ping_interval_sec = 15,
-        .pingpong_timeout_sec = 25,
-        .skip_cert_common_name_check = true,
-    };
-    *out = esp_websocket_client_init(&cfg);
-    if (!*out) {
-        ESP_LOGE(TAG, "ws init failed for %s", path);
-        return;
-    }
-    esp_websocket_register_events(*out, WEBSOCKET_EVENT_ANY, ws_event, NULL);
-    ESP_LOGI(TAG, "%s -> wss://%s:%d%s", spec ? "spec" : "radio", s_cfg.host, s_cfg.port, path);
-    esp_websocket_client_start(*out);
-}
-
-/* ── login ───────────────────────────────────────────────────────────────── */
+/* ── login / wifi ───────────────────────────────────────────────────────── */
 
 static bool mrrc_login(void)
 {
@@ -305,8 +301,6 @@ static bool mrrc_login(void)
     return ok;
 }
 
-/* ── Wi-Fi ───────────────────────────────────────────────────────────────── */
-
 static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
@@ -347,13 +341,41 @@ static bool wifi_up(void)
     return (bits & WIFI_BIT) != 0;
 }
 
+static void ws_open(void)
+{
+    char uri[320];
+    snprintf(uri, sizeof uri, "wss://%s:%d/WSterminal?token=%s", s_cfg.host, s_cfg.port, s_token);
+
+    esp_websocket_client_config_t cfg = {
+        .uri = uri,
+        .headers = s_auth_hdr,
+        .buffer_size = WS_BUF,
+        .task_stack = 6144,
+        .reconnect_timeout_ms = 3000,
+        .network_timeout_ms = 10000,
+        .ping_interval_sec = 15,
+        .pingpong_timeout_sec = 25,
+        .skip_cert_common_name_check = true,
+    };
+    s_ws = esp_websocket_client_init(&cfg);
+    if (!s_ws) {
+        ESP_LOGE(TAG, "ws init failed");
+        return;
+    }
+    esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
+    esp_websocket_client_start(s_ws);
+    ESP_LOGI(TAG, "/WSterminal -> wss://%s:%d/WSterminal", s_cfg.host, s_cfg.port);
+}
+
 static void link_task(void *arg)
 {
     (void)arg;
     if (!wifi_up()) {
-        ESP_LOGE(TAG, "wifi failed; MRRC link not started");
+        ESP_LOGE(TAG, "wifi failed");
         vTaskDelete(NULL);
     }
+    if (!s_abuf) s_abuf = xMessageBufferCreate(16 * 1024);
+
     uint32_t backoff_s = 30;
     for (;;) {
         if (!s_token[0]) {
@@ -364,23 +386,11 @@ static void link_task(void *arg)
                 continue;
             }
             backoff_s = 30;
-            ws_open(&s_ctrl, "/WSradio", false);
-            ws_open(&s_spec, "/WSspectrum", true);
-            ws_open(&s_arx, "/WSaudioRX", false);
-            ws_open(&s_atx, "/WSaudioTX", false);
-            ESP_LOGI(TAG, "heap after 4 sockets: internal free=%u largest=%u psram free=%u",
+            ws_open();
+            ESP_LOGI(TAG, "heap: internal free=%u largest=%u psram free=%u",
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-            if (!s_abuf) {
-                /* Storage in PSRAM: 16 KB of internal RAM is exactly what we
-                 * do not have once four sockets are up. */
-                StaticMessageBuffer_t *sb = heap_caps_malloc(sizeof(StaticMessageBuffer_t),
-                                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-                uint8_t *store = heap_caps_malloc(16 * 1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                s_abuf = (sb && store) ? xMessageBufferCreateStatic(16 * 1024, store, sb)
-                                       : xMessageBufferCreate(4 * 1024);
-            }
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
