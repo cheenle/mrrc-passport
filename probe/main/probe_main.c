@@ -31,6 +31,9 @@
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 
+#include "mrrc_link.h"
+#include "secrets.h"
+
 #define LCD_W 240
 #define LCD_H 320
 
@@ -346,6 +349,15 @@ void app_main(void)
 
     audio_init(i2c);
 
+    static const mrrc_cfg_t cfg = {
+        .ssid = PROBE_WIFI_SSID,
+        .wifi_pass = PROBE_WIFI_PASS,
+        .host = PROBE_SERVER_HOST,
+        .port = PROBE_SERVER_PORT,
+        .server_pass = PROBE_SERVER_PASS,
+    };
+    mrrc_link_start(&cfg);
+
     int hits = 0;
     int phase = 0;
     int16_t tone[320];                /* 20 ms @ 16 kHz */
@@ -365,6 +377,16 @@ void app_main(void)
                     ESP_LOGI(TAG, "mic rms=%d", rms);
                 }
             }
+        }
+
+        /* M2a: what the wire says. Once a second is plenty and stays readable
+         * next to the 1 kHz beep. */
+        if ((tick % 50) == 0) {
+            const mrrc_state_t *st = mrrc_state();
+            ESP_LOGI(TAG, "link: up=%d %ldHz %s %s span=%d serial=%d state=%lu spec=%lu",
+                     (int)st->up, (long)st->freq_hz, st->mode, st->band,
+                     st->scope_span, (int)st->serial_connected,
+                     (unsigned long)st->state_updates, (unsigned long)st->spectrum_frames);
         }
         esp_lcd_touch_read_data(tp);
         uint16_t x = 0, y = 0, strength = 0;

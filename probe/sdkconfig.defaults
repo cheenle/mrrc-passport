@@ -21,3 +21,16 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # --- misc -------------------------------------------------------------------
 CONFIG_FREERTOS_HZ=1000
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# --- TLS: the box serves a self-signed certificate --------------------------
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+
+# --- TLS memory: several WebSocket endpoints coexist on this board ----------
+# Default mbedtls buffers live in internal RAM (16 KB in + 16 KB out per
+# session); the second socket dies with MBEDTLS_ERR_SSL_ALLOC_FAILED (-0x7F00).
+# Park mbedtls' heap in PSRAM and shrink the record buffers to what a 8 KB
+# WebSocket frame actually needs.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=8192
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=8192
