@@ -34,3 +34,13 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=8192
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=8192
+
+# --- Opus (M2b) -------------------------------------------------------------
+# One task only: Xtensa GCC emits no .tbss, so the "thread-safe" pseudostack
+# is not actually per-thread (passport saw a NULL scratch pointer inside
+# celt_decoder). State and pseudostack live in PSRAM, so the 60 KB default
+# costs no internal RAM here.
+CONFIG_OPUS_NONTHREADSAFE_PSEUDOSTACK=y
+CONFIG_OPUS_PSEUDOSTACK_SIZE=60000
+CONFIG_OPUS_STATE_PREFER_PSRAM=y
+CONFIG_OPUS_PSEUDOSTACK_PREFER_PSRAM=y

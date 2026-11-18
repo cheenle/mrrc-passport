@@ -21,8 +21,14 @@ typedef struct {
     bool serial_connected;
     uint32_t state_updates;
     uint32_t spectrum_frames;
+    uint32_t audio_frames;
+    uint32_t audio_drops;
     uint32_t spectrum_bytes;
 } mrrc_state_t;
+
+/* Decoded downlink, 16 kHz mono Int16. Called from the WebSocket task. */
+typedef void (*mrrc_audio_sink_t)(const int16_t *pcm, int samples);
+void mrrc_link_set_audio_sink(mrrc_audio_sink_t fn);
 
 void mrrc_link_start(const mrrc_cfg_t *cfg);
 bool mrrc_link_up(void);

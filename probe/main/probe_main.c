@@ -180,6 +180,14 @@ static uint16_t *fb;
 
 /* ── audio (M1b) ─────────────────────────────────────────────────────────── */
 static esp_codec_dev_handle_t s_codec;
+
+/* Downlink sink: called from the WebSocket task with 16 kHz mono Int16. */
+static void on_downlink(const int16_t *pcm, int samples)
+{
+    if (s_codec && samples > 0) {
+        esp_codec_dev_write(s_codec, (void *)pcm, samples * (int)sizeof(int16_t));
+    }
+}
 static i2s_chan_handle_t s_tx, s_rx;
 
 static void audio_init(i2c_master_bus_handle_t i2c)
@@ -356,6 +364,7 @@ void app_main(void)
         .port = PROBE_SERVER_PORT,
         .server_pass = PROBE_SERVER_PASS,
     };
+    mrrc_link_set_audio_sink(on_downlink);
     mrrc_link_start(&cfg);
 
     int hits = 0;
@@ -365,8 +374,7 @@ void app_main(void)
     int tick = 0;
     while (true) {
         if (s_codec) {
-            audio_tone(tone, 320, &phase);
-            esp_codec_dev_write(s_codec, tone, sizeof(tone));
+            (void)phase; (void)tone;
             if (esp_codec_dev_read(s_codec, mic, sizeof(mic)) == ESP_OK) {
                 int64_t acc = 0;
                 for (int i = 0; i < 320; i++) {
@@ -383,10 +391,10 @@ void app_main(void)
          * next to the 1 kHz beep. */
         if ((tick % 50) == 0) {
             const mrrc_state_t *st = mrrc_state();
-            ESP_LOGI(TAG, "link: up=%d %ldHz %s %s span=%d serial=%d state=%lu spec=%lu",
+            ESP_LOGI(TAG, "link: up=%d %ldHz %s %s state=%lu spec=%lu audio=%lu drop=%lu",
                      (int)st->up, (long)st->freq_hz, st->mode, st->band,
-                     st->scope_span, (int)st->serial_connected,
-                     (unsigned long)st->state_updates, (unsigned long)st->spectrum_frames);
+                     (unsigned long)st->state_updates, (unsigned long)st->spectrum_frames,
+                     (unsigned long)st->audio_frames, (unsigned long)st->audio_drops);
         }
         esp_lcd_touch_read_data(tp);
         uint16_t x = 0, y = 0, strength = 0;

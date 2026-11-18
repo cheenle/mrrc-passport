@@ -27,6 +27,7 @@
 #include "cJSON.h"
 
 #include "mrrc_link.h"
+#include "opus.h"
 
 #define WIFI_BIT  BIT0
 #define WS_BUF    8192
@@ -40,9 +41,11 @@ static mrrc_state_t s_st;
 static EventGroupHandle_t s_net_ev;
 static char s_token[TOKEN_MAX];
 static char s_auth_hdr[TOKEN_MAX + 32];
-static esp_websocket_client_handle_t s_ctrl, s_spec;
+static esp_websocket_client_handle_t s_ctrl, s_spec, s_arx;
 static char s_acc[FRAME_MAX];
 static size_t s_acc_len;
+static mrrc_audio_sink_t s_sink;
+static OpusDecoder *s_dec;               /* single task: only the WS task touches it */
 
 bool mrrc_link_up(void) { return s_st.up; }
 const mrrc_state_t *mrrc_state(void) { return &s_st; }
@@ -114,6 +117,51 @@ static void handle_ctrl_text(const char *payload, int len)
 
 /* ── websocket plumbing ──────────────────────────────────────────────────── */
 
+void mrrc_link_set_audio_sink(mrrc_audio_sink_t fn)
+{
+    s_sink = fn;
+    if (!s_dec) {
+        int err = 0;
+        /* 16 kHz out: the ES8311 on this board must not be run at 48 kHz for
+         * capture, so the whole chain stays at one rate. The server sends
+         * 48 kHz Opus; a 16 kHz decoder resamples it for us. */
+        s_dec = opus_decoder_create(16000, 1, &err);
+        if (err != OPUS_OK || !s_dec) {
+            ESP_LOGE(TAG, "opus decoder create failed (%d)", err);
+            s_dec = NULL;
+        } else {
+            ESP_LOGI(TAG, "opus decoder ready (16 kHz mono)");
+        }
+    }
+}
+
+static void audio_frame(const uint8_t *data, int len)
+{
+    if (len < 2 || !s_sink) return;
+    const uint8_t tag = data[0];
+    s_st.audio_frames++;
+
+    static int16_t pcm[2880];            /* 60 ms @ 48 kHz, the largest frame */
+    int samples = 0;
+    if (tag == 0x01 && s_dec) {
+        samples = opus_decode(s_dec, data + 1, len - 1, pcm, 2880, 0);
+        if (samples < 0) {
+            s_st.audio_drops++;
+            return;
+        }
+    } else if (tag == 0x00) {
+        /* Raw 48 kHz PCM: decimate 3:1 to the codec's 16 kHz. */
+        int n48 = (len - 1) / 2;
+        samples = n48 / 3;
+        const int16_t *in = (const int16_t *)(data + 1);
+        for (int i = 0; i < samples; i++) pcm[i] = in[i * 3];
+    } else {
+        s_st.audio_drops++;
+        return;
+    }
+    if (samples > 0) s_sink(pcm, samples);
+}
+
 static void spec_frame(const uint8_t *data, int len)
 {
     if (len < 2) return;
@@ -134,6 +182,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     esp_websocket_event_data_t *ev = (esp_websocket_event_data_t *)data;
     const bool is_spec = (ev->client == s_spec);
+    const bool is_arx = (ev->client == s_arx);
 
     switch (id) {
     case WEBSOCKET_EVENT_CONNECTED:
@@ -142,19 +191,25 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             /* Declaring "mid" halves the frame: 851 B instead of 1701 B. */
             static const char caps[] = "{\"type\":\"spectrumCaps\",\"profile\":\"mid\"}";
             esp_websocket_client_send_text(s_spec, caps, (int)strlen(caps), pdMS_TO_TICKS(1000));
+        } else if (is_arx) {
+            ESP_LOGI(TAG, "/WSaudioRX connected");
         } else {
             ESP_LOGI(TAG, "/WSradio connected");
             s_st.up = true;
         }
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
-        if (!is_spec) s_st.up = false;
-        ESP_LOGW(TAG, "%s disconnected", is_spec ? "spec" : "radio");
+        if (!is_spec && !is_arx) s_st.up = false;
+        ESP_LOGW(TAG, "%s disconnected", is_spec ? "spec" : (is_arx ? "audioRX" : "radio"));
         break;
     case WEBSOCKET_EVENT_DATA:
         if (ev->op_code == 0x08) break;            /* close frame */
         if (is_spec) {
             spec_frame((const uint8_t *)ev->data_ptr, ev->data_len);
+            break;
+        }
+        if (is_arx) {
+            if (ev->op_code == 0x02) audio_frame((const uint8_t *)ev->data_ptr, ev->data_len);
             break;
         }
         /* Text arrives fragmented on a 5.5 KB fullState: accumulate until the
@@ -309,6 +364,7 @@ static void link_task(void *arg)
             backoff_s = 30;
             ws_open(&s_ctrl, "/WSradio", false);
             ws_open(&s_spec, "/WSspectrum", true);
+            ws_open(&s_arx, "/WSaudioRX", false);
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
