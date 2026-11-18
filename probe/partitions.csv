@@ -1,0 +1,6 @@
+# M3 onwards: the LVGL build is already 1.4 MB, so single_app_large (1.5 MB)
+# leaves no room for the waterfall/overlays. 4 MB app, rest for assets.
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x400000,

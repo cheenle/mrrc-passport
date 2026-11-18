@@ -48,3 +48,17 @@ CONFIG_OPUS_PSEUDOSTACK_PREFER_PSRAM=y
 # Internal RAM is the binding constraint with 4 TLS sockets: allow task stacks
 # and message-buffer storage to live in PSRAM (8 MB idle otherwise).
 # (PSRAM task stacks crashed on this board; left off)
+
+# --- LVGL (M3) --------------------------------------------------------------
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_DEF_REFR_PERIOD=30
+
+# --- partition layout: 4 MB app (was single_app_large 1.5 MB, 8% free) ------
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"

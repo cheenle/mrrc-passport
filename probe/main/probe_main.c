@@ -32,6 +32,7 @@
 #include "esp_codec_dev_defaults.h"
 
 #include "mrrc_link.h"
+#include "ui.h"
 #include "secrets.h"
 
 #define LCD_W 240
@@ -71,7 +72,7 @@ static const ili9341_lcd_init_cmd_t vendor_init[] = {
     {0xC1, (uint8_t[]){0x13}, 1, 0},
     {0xC5, (uint8_t[]){0x22, 0x35}, 2, 0},
     {0xC7, (uint8_t[]){0xBD}, 1, 0},
-    {0x36, (uint8_t[]){0x08}, 1, 0},          /* MADCTL: BGR, portrait */
+    {0x36, (uint8_t[]){0x00}, 1, 0},          /* MADCTL: RGB, portrait */
     {0xB6, (uint8_t[]){0x0A, 0xA2}, 2, 0},
     {0x3A, (uint8_t[]){0x55}, 1, 0},          /* 16 bit / pixel */
     {0xF6, (uint8_t[]){0x01, 0x30}, 2, 0},
@@ -110,6 +111,10 @@ static void backlight_init(void)
 }
 
 static esp_lcd_panel_handle_t panel;
+static esp_lcd_panel_io_handle_t s_io;
+
+static esp_codec_dev_handle_t s_codec;
+static i2s_chan_handle_t s_tx, s_rx;
 
 static void display_init(void)
 {
@@ -134,6 +139,7 @@ static void display_init(void)
         .lcd_param_bits = 8,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_cfg, &io));
+    s_io = io;
 
     const ili9341_vendor_config_t vendor_cfg = {
         .init_cmds = &vendor_init[0],
@@ -141,7 +147,7 @@ static void display_init(void)
     };
     esp_lcd_panel_dev_config_t dev = {
         .reset_gpio_num = -1,      /* panel RST shares the ESP32 EN pin */
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,   /* must match 0x36 bit3 = 0 */
         .bits_per_pixel = 16,
         .vendor_config = (void *)&vendor_cfg,
     };
@@ -176,28 +182,8 @@ static void touch_init(i2c_master_bus_handle_t i2c)
     ESP_LOGI(TAG, "ft6336g up (I2C 0x38, int=%d rst=%d)", PIN_TP_INT, PIN_TP_RST);
 }
 
-static uint16_t *fb;
-
-/* ── audio (M1b) ─────────────────────────────────────────────────────────── */
-static esp_codec_dev_handle_t s_codec;
-
-/* Task stacks in PSRAM: with four TLS sockets the internal heap bottoms out
- * around 4 KB, and any xTaskCreate() after that fails. */
-static TaskHandle_t task_with_psram_stack(TaskFunction_t fn, const char *name, uint32_t stack,
-                                         UBaseType_t prio, BaseType_t core)
-{
-    StaticTask_t *tcb = heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    StackType_t *stk = heap_caps_malloc(stack, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!tcb || !stk) {
-        ESP_LOGE("probe", "no memory for task %s", name);
-        return NULL;
-    }
-    return xTaskCreateStaticPinnedToCore(fn, name, stack / sizeof(StackType_t), NULL, prio, stk, tcb, core);
-}
-
 static volatile bool s_ptt;
 static volatile uint32_t s_tx_frames;
-static i2s_chan_handle_t s_tx, s_rx;
 
 static void audio_init(i2c_master_bus_handle_t i2c)
 {
@@ -287,38 +273,6 @@ static void audio_init(i2c_master_bus_handle_t i2c)
     esp_codec_dev_set_out_vol(s_codec, 60);
     esp_codec_dev_set_in_gain(s_codec, 30.0);
     ESP_LOGI(TAG, "es8311 up (%d Hz mono, pa=%d active-low)", AUDIO_RATE, PIN_PA_EN);
-}
-
-static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
-{
-    return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
-}
-
-static void paint_bars(void)
-{
-    static const uint16_t colours[8] = {
-        0xF800, 0x07E0, 0x001F, 0xFFFF, 0x0000, 0xFFE0, 0x07FF, 0xF81F};
-    for (int y = 0; y < LCD_H; y++) {
-        uint16_t c = colours[y / (LCD_H / 8)];
-        for (int x = 0; x < LCD_W; x++) {
-            fb[y * LCD_W + x] = c;
-        }
-    }
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, 0, 0, LCD_W, LCD_H, fb));
-}
-
-static void paint_dot(int cx, int cy)
-{
-    enum { R = 8 };
-    uint16_t block[R * 2][R * 2];
-    for (int i = 0; i < R * 2; i++) {
-        for (int j = 0; j < R * 2; j++) {
-            block[i][j] = rgb565(255, 255, 255);
-        }
-    }
-    int x0 = cx - R < 0 ? 0 : cx - R;
-    int y0 = cy - R < 0 ? 0 : cy - R;
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, x0, y0, x0 + R * 2, y0 + R * 2, &block[0][0]));
 }
 
 /* Single audio task: reads the mic, keys the uplink when PTT is on, and plays
@@ -412,13 +366,9 @@ void app_main(void)
     display_init();
     touch_init(i2c);
 
-    fb = heap_caps_malloc(LCD_W * LCD_H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-    if (!fb) {
-        ESP_LOGE(TAG, "no PSRAM for framebuffer");
-        return;
-    }
-    paint_bars();
     backlight_set(80);
+
+    ui_init(s_io, panel, tp);
 
     audio_init(i2c);
 
@@ -445,9 +395,9 @@ void app_main(void)
     xTaskCreatePinnedToCore(audio_task, "audio", 10240, NULL, 7, NULL, 0);
     xTaskCreatePinnedToCore(tx_hb_task, "txhb", 2560, NULL, 10, NULL, 1);
 
-    int hits = 0;
     int tick = 0;
     int held_ms = 0;
+    static uint8_t spec[1024];
     while (true) {
         /* BOOT key: 600 ms to key, release to unkey. A short tap never keys. */
         const int lvl = gpio_get_level(0);
@@ -456,34 +406,27 @@ void app_main(void)
             if (held_ms >= 600 && !s_ptt) {
                 s_ptt = true;
                 mrrc_link_set_ptt(true);
+                ui_set_tx(1);
             }
         } else {
             if (s_ptt) {
                 s_ptt = false;
                 mrrc_link_set_ptt(false);
+                ui_set_tx(0);
             }
             held_ms = 0;
         }
 
+        const mrrc_state_t *st = mrrc_state();
+        const int n = mrrc_link_spectrum(spec, sizeof spec);
+        ui_update(st, spec, n);
+
         if ((tick++ % 20) == 0) {
-            const mrrc_state_t *st = mrrc_state();
             ESP_LOGI(TAG, "link: up=%d %ldHz %s %s state=%lu spec=%lu audio=%lu drop=%lu ptt=%d tx=%lu",
                      (int)st->up, (long)st->freq_hz, st->mode, st->band,
                      (unsigned long)st->state_updates, (unsigned long)st->spectrum_frames,
                      (unsigned long)st->audio_frames, (unsigned long)st->audio_drops,
                      (int)s_ptt, (unsigned long)s_tx_frames);
-        }
-        esp_lcd_touch_read_data(tp);
-        uint16_t x = 0, y = 0, strength = 0;
-        uint8_t n = 1;
-        bool pressed = esp_lcd_touch_get_coordinates(tp, &x, &y, &strength, &n, 1);
-        if (pressed && n > 0) {
-            ESP_LOGI(TAG, "touch (%u, %u) strength=%u", x, y, strength);
-            paint_dot(x, y);
-            hits++;
-        }
-        if (hits > 0 && (hits % 32) == 0) {
-            paint_bars();          /* wipe the scribble every 32 taps */
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }

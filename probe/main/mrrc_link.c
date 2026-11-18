@@ -161,6 +161,9 @@ static void handle_bin(const uint8_t *data, int len)
     const uint8_t tag = data[1];
     if (tag != TAG_PCM16 && tag != TAG_PCM48) {
         s_st.audio_drops++;
+        if ((s_st.audio_drops % 50) == 1) {
+            ESP_LOGW(TAG, "unplayable audio tag 0x%02x (pcm16 expected)", tag);
+        }
         return;
     }
     s_st.audio_frames++;
@@ -179,8 +182,9 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         {
             static const char ac[] = "{\"type\":\"audioCaps\",\"profile\":\"pcm16\"}";
             static const char sc[] = "{\"type\":\"spectrumCaps\",\"profile\":\"mid\"}";
-            esp_websocket_client_send_text(s_ws, ac, (int)strlen(ac), pdMS_TO_TICKS(1000));
-            esp_websocket_client_send_text(s_ws, sc, (int)strlen(sc), pdMS_TO_TICKS(1000));
+            int a = esp_websocket_client_send_text(s_ws, ac, (int)strlen(ac), pdMS_TO_TICKS(1000));
+            int b = esp_websocket_client_send_text(s_ws, sc, (int)strlen(sc), pdMS_TO_TICKS(1000));
+            ESP_LOGI(TAG, "caps sent (audioCaps=%d spectrumCaps=%d)", a, b);
         }
         s_st.up = true;
         break;
@@ -192,10 +196,15 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (ev->op_code == 0x08) break;
         if (ev->op_code == 0x02) {
             handle_bin((const uint8_t *)ev->data_ptr, ev->data_len);
-        } else if (ev->op_code == 0x01) {
+        } else if (ev->op_code == 0x01 || (s_acc_len > 0 && ev->op_code == 0x00)) {
+            /* A 5.5 KB fullState is fragmented by the 4 KB frame buffer; the
+             * continuation frames arrive with op_code 0x00 and must be folded
+             * in, otherwise the JSON never parses (state=0 symptom). */
             if (s_acc_len + ev->data_len < sizeof s_acc) {
                 memcpy(s_acc + s_acc_len, ev->data_ptr, ev->data_len);
                 s_acc_len += ev->data_len;
+            } else {
+                s_acc_len = 0;                 /* overflow: drop the message */
             }
             if (ev->payload_offset + ev->data_len >= ev->payload_len) {
                 handle_text(s_acc, (int)s_acc_len);
