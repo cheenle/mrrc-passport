@@ -1,0 +1,23 @@
+# M1a probe — ESP32-S3 N16R8 (ES3C28P 2.8" panel board)
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- CPU / flash / PSRAM -----------------------------------------------------
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_HEADER_FLASHSIZE_UPDATE=n
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+# The board carries a Puya (0x5E) part; vendor firmware ran qio120, we stay at 80 MHz.
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# --- console: native USB-Serial/JTAG ----------------------------------------
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# --- misc -------------------------------------------------------------------
+CONFIG_FREERTOS_HZ=1000
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y

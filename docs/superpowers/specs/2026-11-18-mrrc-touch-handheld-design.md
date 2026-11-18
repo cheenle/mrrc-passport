@@ -216,6 +216,7 @@ y 278..300   底栏   [FREQ/1k](点:步进) │ [RX/TX] │ [LINK]
 
 | 风险 | 处理 |
 |---|---|
+| **烧写镜像头必须 DIO/40 MHz** | 用 `qio80` 写 bootloader 会让 ROM 打 `ets_loader.c 78` 后 TG0WDT 循环复位（实测）。QIO 需要 flash 的 QE 位，ROM 阶段读不了。**写 flash 一律 `--flash_mode dio --flash_freq 40m`**，QIO 交给 bootloader 自己按 sdkconfig 打开 |
 | ILI9341 厂家 gamma/power 序列不对 → 花屏/偏色 | 直接抄 xiaozhi 板级的 20 条 `vendor_specific_init`；`DISPLAY_INVERT_COLOR` 与 `RGB_ORDER(BGR)` 一并照抄 |
 | FT6336 与 ES8311 共用 I2C，初始化顺序敏感 | 先 `bsp_i2c_init` → 触摸复位 → codec 配置；触摸复位后再 `lvgl_port_add_touch` |
 | PSRAM 上跑 LVGL 缓冲导致撕裂 | 用 `double_buffer` + `full_refresh=0`；实测不过就退回内部 RAM 40 行 |
