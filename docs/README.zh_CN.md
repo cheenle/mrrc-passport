@@ -46,7 +46,7 @@
 | 我想要…… | 从这里开始 |
 | --- | --- |
 | 使用设备、体验官方玩法 | [快速上手](https://ai-passport.folotoy.cn/guides/getting-started/) · [官方玩法](https://ai-passport.folotoy.cn/plays/) |
-| 让 AI 开发自定义应用 | [Agent 规范](/AGENTS.zh_CN.md) · [AI 开发指南](/docs/development/ai-guide.zh_CN.md) · [必需技能](/skills/README.zh_CN.md) |
+| 让 AI 开发自定义应用 | [Agent 规范](/AGENTS.zh_CN.md) · [AI 开发指南](/docs/development/ai-guide.zh_CN.md) |
 | 准备环境、编译固件 | [环境准备](/docs/development/engineering/environment-setup.zh_CN.md) · [构建与测试](/docs/development/engineering/build-and-test.zh_CN.md) |
 | 了解硬件、参与贡献 | [硬件指南](/docs/hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.zh_CN.md) · [贡献指南](/.github/CONTRIBUTING.zh_CN.md) |
 
@@ -58,7 +58,7 @@
 ## 用一句需求开始开发
 
 1. 在 AI 编程工具中打开仓库，让它先阅读 [`AGENTS.md`](/AGENTS.md)。
-2. 由 AI 自行检查、安装[五个必需技能](/skills/README.zh_CN.md)，按当前环境要求取得必要权限。
+2. 由 AI 先检查上游的技能包；这些技能本 fork 未收录。
 3. 描述你想做的应用，从 `main` 创建新的 `feature/*` 分支开始开发。
 
 复制这段提示词，替换成你的创意：
@@ -199,7 +199,7 @@ LICENSE                  仓库许可证
 | 入口 | 你可以找到 |
 | --- | --- |
 | [开发指南](/docs/development/README.zh_CN.md) | AI 工作流、工程规范、CI 与发布流程 |
-| [AI 技能](/skills/README.zh_CN.md) | 开发、环境准备、构建、真机测试与故障诊断 |
+| AI 技能 | 仅上游有，本 fork 未收录；见 [AGENTS.zh_CN.md](/AGENTS.zh_CN.md)。 |
 | [硬件资料](/docs/hardware-design/README.zh_CN.md) | 板卡事实、接口边界、验收清单与排障 |
 | [中文字体](/docs/development/engineering/lvgl-chinese-fonts.zh_CN.md) | 字形覆盖、控件字体选择，以及中文空白排查 |
 | [Wi-Fi 配网](/docs/development/engineering/wifi-provisioning.zh_CN.md) | 蓝牙配网实现参考与配套小程序 |

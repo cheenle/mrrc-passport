@@ -3,6 +3,5 @@ build-mac/
 managed_components/
 sdkconfig
 sdkconfig.old
-dependencies.lock
 *.bin
 sdkconfig.defaults.local

@@ -47,7 +47,7 @@ it anything—from a pocket companion to something no one has imagined yet.
 | I want to… | Start here |
 | --- | --- |
 | Use the device or try an official play | [Getting started](https://ai-passport.folotoy.cn/guides/getting-started/) · [Official plays](https://ai-passport.folotoy.cn/plays/) |
-| Build a custom application with AI | [Agent instructions](/AGENTS.md) · [AI development guide](/docs/development/ai-guide.md) · [Required skills](/skills/README.md) |
+| Build a custom application with AI | [Agent instructions](/AGENTS.md) · [AI development guide](/docs/development/ai-guide.md) |
 | Prepare my environment and build firmware | [Environment setup](/docs/development/engineering/environment-setup.md) · [Build and test](/docs/development/engineering/build-and-test.md) |
 | Explore the board or contribute | [Hardware guide](/docs/hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.md) · [Contributing](/.github/CONTRIBUTING.md) |
 
@@ -59,7 +59,7 @@ it anything—from a pocket companion to something no one has imagined yet.
 ## Start development with one requirement
 
 1. Open the repository in your AI coding tool and have it read [`AGENTS.md`](/AGENTS.md).
-2. Let it check and install the [five required skills](/skills/README.md), with any permissions your environment requires.
+2. Let it check the upstream AI skill set before you start; those skills are not vendored in this fork.
 3. Describe what you want to build. Start from `main` on a new `feature/*` branch.
 
 Copy this prompt and adapt it to your idea:
@@ -205,7 +205,7 @@ provide reference material. Choose the entry that matches your task.
 | Resource | What you will find |
 | --- | --- |
 | [Development](/docs/development/README.md) | AI workflow, engineering conventions, CI, and release guidance |
-| [AI skills](/skills/README.md) | Development, environment setup, builds, device testing, and debugging |
+| AI skills | Upstream-only; not vendored in this fork. See [AGENTS.md](/AGENTS.md). |
 | [Hardware](/docs/hardware-design/README.md) | Board facts, interface boundaries, acceptance checklists, and troubleshooting |
 | [Chinese fonts](/docs/development/engineering/lvgl-chinese-fonts.md) | Glyph coverage, widget font selection, and blank-text troubleshooting |
 | [Wi-Fi provisioning](/docs/development/engineering/wifi-provisioning.md) | Bluetooth provisioning reference and companion mini program |
