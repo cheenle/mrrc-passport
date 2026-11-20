@@ -11,7 +11,8 @@ passport skill、规定 LVGL 二次开发流程）**不适用于本项目**，�
 | 任何改动 | `docs/design-v1.md`（硬件事实、实测数据、全部踩过的坑） |
 | 音频相关 | 本文 §1，`docs/design-v1.md` §3.1 / §6 |
 | 网络相关 | 本文 §2，`docs/design-v1.md` §9 |
-| 内存/性能 | `docs/design-v1.md` §4 / §13 |
+| **卡顿/性能/丢帧** | **`docs/design-v1.md` §5.1 + §12.1**（判断顺序，别再从"加大缓冲"开始） |
+| 内存 | `docs/design-v1.md` §4，特别是 §4.3（`largest` 是唯一要盯的数） |
 | 引脚与器件 | `components/bsp/include/bsp_pins.h`（单一事实来源） |
 
 ## §1 不可改动的约束
@@ -20,16 +21,20 @@ passport skill、规定 LVGL 二次开发流程）**不适用于本项目**，�
 
 1. **codec 固定 16 kHz**。ES8311 在 48 kHz 采集近乎失聪（峰值 468 vs 12708）。
    服务端要 48 kHz，靠软件重采样对接；运行期不要调 `bsp_audio_set_format`。
-2. **micro-opus 必须打补丁**：`tools/patch_microopus.sh`。pseudostack 16 KB
-   （Kconfig 默认下限 60 KB 装不下），且必须 `NONTHREADSAFE`——RISC-V GCC
-   不生成 `.tbss`，线程安全模式会把 NULL 写进 `celt_decoder`。
-3. **LVGL 绘制缓冲保持 8 行**。2 行会让 240×30 的瀑布分 15 次刷屏，
-   直接把 `taskLVGL` 顶到看门狗。
-4. **上行帧是单层 `[0x01][PCM]`**，下行是双层 `[0x00][codec][payload]`。
-   两者不同，别照抄。
-5. **频谱用 `lv_line`，不要用 `lv_image`**。后者要 240×H×2 的像素缓冲，
-   前者只存顶点坐标。
-6. **LAN 路由已不走**：服务端是 `w103d.vlsc.net`（IPv6-only）。
+2. **没有 libopus，PCM16 裸传**（2026-11-19 移除）。单核 160 MHz 付不起它的
+   CPU 和 16 KB 连续堆。带宽从 12 kbps 涨到 256 kbps，实测这从来不是瓶颈。
+3. **LVGL 绘制缓冲 24 行**（`BSP_LVGL_DRAW_BUFFER_LINES`）。8 行是 PCM16 之前
+   的临时值，当时被误当成"内存不够"；Espressif 的经验是低于屏幕 10% 会严重拖慢
+   渲染。32 行 CPU 更好但 `largest` 只剩 18 KB，24 行是个折中。
+4. **上行帧是双层 `[0x01 频道][0x02 标签][int16]`**，下行是 `[0x00][标签][int16]`。
+   **漏掉频道字节服务端会把 PCM 当频谱路由**，表现是"设备一切正常但对方听不见"。
+5. **发射时主动降频谱档并丢弃频谱帧**（单工）。频谱帧 1701 B 排在音频帧 642 B
+   前面，在一条 TCP 上就是几秒的延迟。别把这个逻辑当成可选的优化删掉。
+6. **频谱用 `lv_line`，不要用 `lv_image`**。后者要 240×H×2 的像素缓冲，
+   前者只存顶点坐标（`s_pts` 240 项，不是 850）。
+7. **LAN 路由已不走**：服务端是 `w103d.vlsc.net`（IPv6-only）。
+8. **麦克风增益按 6 dB 步进**。ES8311 的 PGA 是阶梯的（0/6/12/.../42），
+   1 dB 步进时 18→23 dB 写的是同一个寄存器值，看起来"调了没反应"。最大 42 dB。
 
 ## §2 IPv6 的三个开关（缺一不可）
 
