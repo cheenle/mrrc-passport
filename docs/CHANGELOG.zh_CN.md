@@ -10,6 +10,12 @@
 
 ## Unreleased
 
+- 修复下行音频丢帧：PCM 环形缓冲从 8 KB 提高到 16 KB（0.26 s → 0.51 s），让会话开始时 TCP 的一次性积压有地方落；WebSocket 接收缓冲从 4 KB 提高到 8 KB，使 1701 字节的频谱帧不再反压 socket（服务端曾实测到 5.8 s 的 pump stall）；链路改为半双工：发射时频谱降到 `low` 档并丢弃 scope 帧。在真实服务端上实测：`err=0 drop=0`，49.9 帧/秒。
+
+- 新增 `probe/`：下一代触屏手持机（ILI9341 + FT6336G + ES8311）的点亮验证固件，并附设计文档。它是一个独立的 ESP-IDF 工程，不属于 `mrrc-terminal` 镜像。
+
+- 让干净的 checkout 能编译、能在这块板上跑起来：补回 `CONFIG_LV_FONT_MONTSERRAT_44`（频率大字用的就是这个字模，而 `sdkconfig.defaults` 已不再启用它，导致新 clone 编译不过）；关闭 `CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM`（在 `^9.5.0` 约束实际解析到 LVGL 9.6 的情况下，它把约 117 KB 代码搬进 SRAM，启动堆只剩 88 KB，`esp_wifi_init` 直接内存不足、设备无限重启）；并把配置拆成两层，设备凭证放入被 gitignore 的 `sdkconfig.defaults.local`，不再进入公开仓库。
+
 - 加入厂家为优特利 520mAh 电芯生成的 80 字节 CW2017 profile，并实现内容与更新标志检查、写入后校验、规定的重启时序以及有上限的 SOC 就绪等待。
 
 - 扩充环境引导文档：新增乐鑫 Git 服务镜像（`git.espressif.com.cn`）作为中国大陆首选线路，覆盖 ESP-IDF v5.5.3 及其子模块；补充子模块长等待/超时处理、原地修复，以及 `esp32-wifi-lib` 等大仓的按钉死 commit 浅取；提示按仓库残留的 Jihulab `insteadOf` 旧配置；并把官方离线 release 压缩包加入兜底方案（经验来自 `esp-mosaico/esp-mosaico-vibe`）。

@@ -12,6 +12,12 @@
 
 ## Unreleased
 
+- Stop losing downlink audio frames: the 8 KB PCM ring becomes 16 KB (0.26 s -> 0.51 s) so the TCP backlog at session start has somewhere to land, the WebSocket receive buffer goes 4 KB -> 8 KB so a 1701-byte spectrum frame no longer back-pressures the socket (the server measured a 5.8 s pump stall), and the link is now half duplex — the spectrum tier drops to `low` and scope frames are discarded while keyed. Measured on the live server: `err=0 drop=0` at 49.9 frames/s.
+
+- Add `probe/`, the throwaway bring-up firmware for the next-generation touch handheld (ILI9341 + FT6336G + ES8311), with its design document. It is a separate ESP-IDF project under `probe/` and is not part of the `mrrc-terminal` image.
+
+- Make a clean checkout build and fit on the board: restore `CONFIG_LV_FONT_MONTSERRAT_44` (the frequency readout uses that face and `sdkconfig.defaults` no longer enabled it, so a fresh clone did not compile), turn off `CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM` (with the `^9.5.0` constraint resolving to LVGL 9.6 it moved ~117 KB of code into SRAM, leaving an 88 KB boot heap and an `esp_wifi_init` out-of-memory reboot loop), and split the defaults so per-device credentials live in a gitignored `sdkconfig.defaults.local` instead of the public tree.
+
 - Added the supplied 80-byte CW2017 profile for the specified 520 mAh cell, including content/update-flag checks, verified writes, the required restart sequence, and bounded SOC-readiness polling.
 
 - Expanded the environment bootstrap document: added Espressif's Git service mirror (`git.espressif.com.cn`) as the preferred mainland-China route for ESP-IDF v5.5.3 and its submodules, documented submodule long-wait/timeout handling, in-place repair, and the pinned-commit shallow fetch for large submodules such as `esp32-wifi-lib`, warned about stale per-repository Jihulab `insteadOf` residue, and added the official offline release archive as a last-resort fallback (learned from `esp-mosaico/esp-mosaico-vibe`).
