@@ -29,11 +29,19 @@ static const char *TAG = "audio";
 
 #define AUD_WS_STACK   6144
 #define AUD_TASK_STACK 8192
-/* PCM is uncompressed: 16 kHz mono is 32 kB/s, so the ring holds ~0.26 s and a
+/* PCM is uncompressed: 16 kHz mono is 32 kB/s, so the ring holds ~0.5 s and a
  * frame slot must fit the largest packet the server sends.  The server
  * coalesces downlink in 20 ms units (640 B), but bursts are possible, so allow
- * 60 ms — the same span the Opus path used to cover. */
-#define AUD_RB_BYTES   8192         /* ~0.26 s of 16 kHz PCM */
+ * 60 ms — the same span the Opus path used to cover.
+ *
+ * 16 KB, not 8 KB.  Measured against the live server (2026-11-20): the first
+ * seconds of a session arrive at 92 frames/s against a 50/s nominal rate, i.e.
+ * TCP delivers a backlog in one burst, and 0.26 s of ring was not deep enough
+ * to absorb it — 253 frames were dropped over six minutes and the delivered
+ * rate settled at 41/s, heard as steady stutter.  Doubling the ring costs 8 KB
+ * of .bss and buys 0.5 s of slack; `largest` was 46 KB before the change, so
+ * the PTT handshake (16 KB contiguous) still has room. */
+#define AUD_RB_BYTES   16384        /* ~0.51 s of 16 kHz PCM */
 #define AUD_FRAME_MAX  1920         /* 60 ms @ 16 kHz mono */
 /* The codec runs at 16 kHz, not 48 kHz.  Measured on this board: the ES8311
  * ADC delivers ~468 peak at 48 kHz and ~12708 at 16 kHz for the same speech —

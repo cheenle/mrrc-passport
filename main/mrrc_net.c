@@ -37,7 +37,20 @@
 
 static const char *TAG = "net";
 
-#define WS_BUF_SIZE    4096
+/* The client's rx buffer holds whatever arrived in one reads() — downlink audio
+ * frames (642 B each, 50/s), spectrum frames (1701 B, ~5.3/s) and control
+ * replies compete for it.  At 4096 a spectrum frame that lands on top of two
+ * audio frames leaves too little room and esp_websocket_client blocks the
+ * caller rather than dropping, which stalls the audio pump on the server side
+ * (measured: `max pump stall 5791 ms`).  8 KB gives the reader room to drain a
+ * burst without back-pressuring the socket. */
+#define WS_BUF_SIZE    8192
+
+/* Set while the operator is keyed.  Half duplex: the radio is not receiving
+ * while it transmits, so any scope frame that arrives is stale before it is
+ * drawn — and on this board every byte of it shares the one TCP connection
+ * with the uplink audio. */
+static volatile bool s_tx_busy;
 #define WS_TASK_STACK  6144
 #define NET_TASK_STACK 6144
 #define TOKEN_MAX      256
@@ -323,6 +336,14 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
              * audio packet would have been handed to the spectrum parser. */
             const uint8_t chan = ((const uint8_t *)ev->data_ptr)[0];
             if (chan == 0x02) {
+                /* Half duplex: drop scope while keyed.
+                 *
+                 * The server keeps sending until it processes our tier change,
+                 * and the radio's own sweep is frozen anyway, so drawing these
+                 * would put stale rows on the waterfall and spend CPU that the
+                 * uplink needs.  Cheaper to throw the frame away than to
+                 * redraw a picture of nothing. */
+                if (s_tx_busy) break;
                 mrrc_ui_spectrum((const uint8_t *)ev->data_ptr + 2,
                                  (size_t)ev->data_len - 2);
             } else if (chan == 0x00) {
@@ -375,7 +396,24 @@ void mrrc_net_set_ptt(bool on)
     snprintf(msg, sizeof msg, "{\"type\":\"set\",\"field\":\"ptt\",\"value\":%s}",
              on ? "true" : "false");
     ws_send_text(msg);
-    ESP_LOGI(TAG, "PTT %s", on ? "ON" : "OFF");
+
+    /* Drop the spectrum tier for the duration of the transmission.
+     *
+     * Everything shares one TCP connection on this board, so a Full spectrum
+     * frame (1701 B) queued between two uplink audio frames is 1701 B of
+     * latency in front of the operator's voice.  The waterfall is not worth
+     * that while talking — it is already scrolling off-screen data.  "low" is
+     * the server's cheapest tier; the display keeps updating, just coarser.
+     *
+     * Restored on unkey so the operator gets the full-resolution sweep back
+     * the moment they stop talking. */
+    s_tx_busy = on;
+    const char *tier = on ? "low" : "high";
+    char cap[64];
+    snprintf(cap, sizeof cap, "{\"type\":\"spectrumCaps\",\"profile\":\"%s\"}", tier);
+    esp_websocket_client_send_text(s_ws, cap, (int)strlen(cap), pdMS_TO_TICKS(500));
+
+    ESP_LOGI(TAG, "PTT %s, spectrum %s", on ? "ON" : "OFF", tier);
 }
 
 /* Settle the wire format.  Called from the UI tick (5 Hz), which is far more
