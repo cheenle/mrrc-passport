@@ -7,10 +7,55 @@ audio, and uplink PCM. Removing the second persistent audio TLS/WebSocket was a
 useful memory optimization, but the new 240×54 RGB565 spectrum waterfall has
 consumed much of that benefit.
 
-The current implementation must retain the complete 240×54 waterfall and its
-64-colour Jet palette. The server protocol, single-socket architecture, 16 kHz
-codec, 16 KB micro-opus pseudostack, and PTT behaviour are outside the scope of
-this optimization.
+The implementation must retain the complete spectrum and waterfall
+presentation. The server protocol, single-socket architecture, 16 kHz codec, and
+PTT behaviour are outside the scope of this optimization. There is no codec
+library in the image: `main/mrrc_audio.c` passes Int16 PCM straight to the
+ES8311, so the micro-opus pseudostack this document used to budget for no longer
+exists.
+
+## Status: what actually shipped (2026-11-20, v1.2.0)
+
+All four stages landed, and two findings from the device contradict assumptions
+made when this plan was written.
+
+| Stage | Outcome |
+| --- | --- |
+| 1. Deterministic buffer reuse | Landed. Downlink decimates in place; uplink builds one tagged packet buffer. |
+| 2. Task and socket memory | Landed differently: `AUD_TASK_STACK` is 8,192 B, but the `/WSterminal` buffer went **up** 4,096 → 8,192 B. A 4 KB receive buffer back-pressured the socket: the server measured a 5.8 s pump stall. Smaller was not better. |
+| 3. 8-bit indexed waterfall | Landed (`main/mrrc_scope.c`), 240×54 with the full Jet palette. |
+| 4. Refresh and fragmentation | Landed. `BSP_LVGL_DRAW_BUFFER_LINES` is **24**, not 8: the buffer is not the binding constraint once LVGL uses the system heap. |
+
+Two corrections for anyone reading the rest of this document:
+
+- **The board runs ESP-IDF 5.5.3, not 5.4.2.**
+- **`CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM` must stay off.** `lvgl/lvgl` is
+  constrained to `^9.5.0`, which resolves to 9.6.x; 9.6 applies
+  `LV_ATTRIBUTE_FAST_MEM` to far more draw code, and with that option on it
+  moved ~117 KB into SRAM. On the C3, IRAM and DRAM are one 400 KB pool, so DRAM
+  went 170 KB → 287 KB and the boot heap 201 KB → 88 KB, which made
+  `esp_wifi_init()` fail with `ESP_ERR_NO_MEM` and reboot-loop the device.
+
+## Current measured state
+
+Measured on the real board in November 2026, ESP-IDF 5.5.3, `-O2`, with
+`CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM` off:
+
+| Metric | Value |
+| --- | ---: |
+| DRAM used / total | 179,022 / 321,296 B (55.7%) |
+| Flash code | 1,175,482 B |
+| Boot heap `free` / `largest` | 201 KB / 112 KB |
+| Heap after starting the network | 119 KB / 104 KB |
+| Steady-state `free` / `largest` | 46–49 KB / 30–32 KB |
+| Audio ring / WS receive buffer | 16,384 B / 8,192 B |
+| LVGL draw buffer | 24 lines (11,520 B) |
+| Steady-state audio drops | ~2% (`err=0`), still open |
+
+## Baseline when this plan was written
+
+The numbers below are from the original plan and are kept only as history; they
+describe an Opus-era build that no longer exists.
 
 Latest measured baseline:
 
@@ -51,7 +96,7 @@ measurements rather than inferred from MAP alone.
 - No server or protocol changes.
 - No codec sample-rate changes and no runtime codec reconfiguration.
 - No reduction in waterfall dimensions, palette, or spectrum content.
-- No smaller Opus pseudostack, smaller jitter buffer, or new Opus encoder.
+- No new audio codec; the wire format is PCM16 both ways.
 - No spectrum/waterfall removal or move to a separate page.
 - No wholesale rewrite of cJSON handling in the first implementation stage.
 
@@ -199,7 +244,7 @@ consider a small allocation-free parser for the known control schema.
 
 ### Build and static measurements
 
-- Build the current source with ESP-IDF 5.4.2 and `-O2`.
+- Build the current source with ESP-IDF 5.5.3 and `-O2`.
 - Compare `libmain.a` `.bss`, total DRAM, and firmware size against baseline.
 - Confirm no credentials or local `sdkconfig` values enter tracked files.
 

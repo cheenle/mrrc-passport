@@ -1,240 +1,271 @@
-# 变更日志（本次优化阶段）
+<p align="right">
+  <a href="CHANGELOG-optimization.zh_CN.md">简体中文</a> · <strong>English</strong>
+</p>
 
-时间范围：从 `1a99a2f`（PCM16 打通）到提交 `802bbc8` 之后的全部改动。
-每条都注明 **实测结果** 与 **是否保留**。回退点：`802bbc8`。
+# Change log (this optimisation phase)
+
+Range: `1a99a2f` (PCM16 working) through everything after commit `802bbc8`. Each
+entry records the **measured result** and **whether it was kept**. Rollback
+point: `802bbc8`.
 
 ---
 
-## 一、保留的改动
+## 1. Changes that were kept
 
-### 1. TX 上行补频道字节（关键修复）
+### 1. Add the channel byte to the TX uplink (critical fix)
 
-**文件**：`main/mrrc_tx.c`
+**File**: `main/mrrc_tx.c`
 
 ```c
-// 改前: [0x02][PCM]          — 服务器当频谱帧丢弃
-// 改后: [0x01][0x02][PCM]    — 0x01 = TX 音频通道
+// before: [0x02][PCM]          — the server discards it as a spectrum frame
+// after:  [0x01][0x02][PCM]    — 0x01 = TX audio channel
 ```
 
-**症状**：发射无功率、无声音。
-**原因**：`/WSterminal` 二进制帧首字节是频道（`0x00` 下行音频 / `0x01` 上行音频 / `0x02` 频谱）。
-固件把 codec tag `0x02` 发到首位，服务器判为频谱通道，PCM 被丢弃。
-**结果**：修复后发射正常，`peak=12540`。
+**Symptom**: transmitting produced no power and no audio.
+**Cause**: the first byte of a `/WSterminal` binary frame is the channel
+(`0x00` downlink audio / `0x01` uplink audio / `0x02` spectrum). The firmware put
+the codec tag `0x02` first, so the server treated it as the spectrum channel and
+dropped the PCM.
+**Result**: transmit works, `peak=12540`.
 
 ---
 
-### 2. 删除 48 kHz 死代码路径
+### 2. Delete the dead 48 kHz code path
 
-**文件**：`main/mrrc_tx.c`
+**File**: `main/mrrc_tx.c`
 
-服务器每次连接都确认 `pcm16 accepted (16000 Hz)`，48 kHz 分支永不执行，
-且是越界写的来源（`TX_FRAME_16K` 从 320 改成 640 后 `i*3` 写到索引 1917，
-而缓冲只有 960）。已整段删除，只保留 16 kHz。
+Every connection confirms `pcm16 accepted (16000 Hz)`, so the 48 kHz branch
+never ran — and it was the source of an out-of-bounds write (`TX_FRAME_16K`
+changed 320 → 640 so `i*3` wrote to index 1917 while the buffer held 960). The
+whole branch is gone; only 16 kHz remains.
 
 ---
 
-### 3. 频谱档位 `mid` → `high`（Full）
+### 3. Spectrum tier `mid` → `high` (Full)
 
-**文件**：`main/mrrc_net.c`
+**File**: `main/mrrc_net.c`
 
-| | 档位 | 帧大小 | 帧率 |
+| | Tier | Frame size | Frame rate |
 |---|---|---|---|
-| 改前 | `mid` | 851 B | ~2.7 帧/秒 |
-| 改后 | `high` | 1701 B | ~5.3 帧/秒 |
+| Before | `mid` | 851 B | ~2.7 frames/s |
+| After | `high` | 1701 B | ~5.3 frames/s |
 
-**原因**：每帧就是瀑布的一行历史，半速就是半行速，看起来像爬。
-**代价**：~73 kbit/s（原 ~18）。固件的 850-bin 缓冲本来就是按 Full 分配的。
-
----
-
-### 4. 发射时频谱降档到 `low`
-
-**文件**：`main/mrrc_net.c`
-
-PTT 按下时发 `spectrumCaps: low`（426 B / divider 4），松手回 `high`。
-发射时屏幕没人看，省下的带宽给 256 kbit/s 的音频上行。
+**Reason**: every frame is one waterfall row, so half the rate is half the row
+rate and looks like crawling.
+**Cost**: ~73 kbit/s (was ~18). The firmware's 850-bin buffer was already sized
+for Full.
 
 ---
 
-### 5. 瀑布 30 → 40 行，曲线 56 → 45 px
+### 4. Drop the spectrum tier to `low` while transmitting
 
-**文件**：`main/mrrc_ui.c`
+**File**: `main/mrrc_net.c`
 
-- `WF_H`: 30 → 40（`.bss` 14.4 KB → 18.8 KB）
-- `PLOT_H`: 56 → 45（0.8×，高度让给瀑布）
-
-**试过 60 行并放弃**：把 `largest` 压到 3 KB，PTT 的 TLS 握手拿不到连续内存，
-发射自己断开。
+On PTT it sends `spectrumCaps: low` (426 B / divider 4) and returns to `high` on
+release. Nobody watches the screen while transmitting, and the saved bandwidth
+goes to the 256 kbit/s uplink.
 
 ---
 
-### 6. 频谱与瀑布之间留 5 行黑隙
+### 5. Waterfall 30 → 40 rows, trace 56 → 45 px
 
-**文件**：`main/mrrc_ui.c`，`Y_WF`: 192 → 196
+**File**: `main/mrrc_ui.c`
 
-LVGL 会合并相邻脏区，瀑布紧贴曲线时两者被当成一整块重绘（约 40 KB）。
-留空隙后各自独立重绘。
+- `WF_H`: 30 → 40 (`.bss` 14.4 KB → 18.8 KB)
+- `PLOT_H`: 56 → 45 (0.8×; the height goes to the waterfall)
 
-**实测**：`taskLVGL` 44% → 35%（8 个百分点，不是决定性改善）。
-
----
-
-### 7. 顶/底行文字改橙色 + 底部加分隔线
-
-**文件**：`main/mrrc_ui.c`
-
-- 顶栏（模式 / VFO / 电量）、底部 chips（FREQ / RX / LINK）全改 `C_ORANGE`
-- 新增 `rule_bot`：y=270 的 1 px 橙线，与顶部 `rule`(y=26) 对称
+**Tried 60 rows and abandoned it**: it pushed `largest` down to 3 KB, the PTT TLS
+handshake could not get contiguous memory, and the transmission dropped itself.
 
 ---
 
-### 8. 字号统一 12，频率改原生 44
+### 6. Leave a 5-row black gap between trace and waterfall
 
-**文件**：`main/mrrc_ui.c` + `sdkconfig(.defaults)`
+**File**: `main/mrrc_ui.c`, `Y_WF`: 192 → 196
 
-| 用途 | 字号 |
+LVGL merges adjacent dirty areas, so with the waterfall flush against the trace
+both were repainted as one block (about 40 KB). With the gap they repaint
+independently.
+
+**Measured**: `taskLVGL` 44% → 35% (8 points — helpful, not decisive).
+
+---
+
+### 7. Orange text on the top and bottom rows, plus a bottom rule
+
+**File**: `main/mrrc_ui.c`
+
+- Top bar (mode / VFO / battery) and bottom chips (FREQ / RX / LINK) all use
+  `C_ORANGE`
+- New `rule_bot`: a 1 px orange line at y=270, mirroring `rule` at y=26
+
+---
+
+### 8. One font size for text (12), frequency at native 44
+
+**File**: `main/mrrc_ui.c` + `sdkconfig(.defaults)`
+
+| Use | Size |
 |---|---|
-| 除频率外全部 | 12 |
-| 频率 | 44（原生） |
+| Everything except the frequency | 12 |
+| Frequency | 44 (native) |
 
-**为什么不用 `transform_scale`**：它不放大对象本身，42 px 字形画进 28 px 框只剩上半截；
-把框改高后**完全黑屏**（与圆角遮罩回调冲突）。
+**Why not `transform_scale`**: it does not enlarge the object itself, so a 42 px
+glyph drew into a 28 px box and only the top half survived; making the box taller
+then gave a **completely black screen** (it conflicts with the rounded-corner
+mask callback).
 
-**字模清理**：12 / 20 / 44 三套 → **12 / 44 两套**（20 从未被使用）。
-`sdkconfig.defaults` 原来还写着 12/14/28，与代码不符，已同步。
-
----
-
-### 9. UI 刷新 200 ms → 300 ms
-
-**文件**：`main/mrrc_ui.c`，`REFRESH_MS`
-
-200 ms 时 `taskLVGL` 占 47–55%，音频任务只拿 <1%，环形缓冲溢出。
-降到 300 ms 后丢帧 10.4% → 2.3%。
+**Font cleanup**: 12 / 20 / 44 → **12 / 44** (20 was never used).
+`sdkconfig.defaults` still said 12/14/28, which no longer matched the code, and
+was brought in line.
 
 ---
 
-### 10. 发射期间暂停频谱/瀑布绘制
+### 9. UI refresh 200 ms → 300 ms
 
-**文件**：`main/mrrc_ui.c`
+**File**: `main/mrrc_ui.c`, `REFRESH_MS`
+
+At 200 ms `taskLVGL` took 47–55%, the audio task got <1%, and the ring
+overflowed. At 300 ms, dropped frames went 10.4% → 2.3%.
+
+---
+
+### 10. Skip spectrum/waterfall drawing while transmitting
+
+**File**: `main/mrrc_ui.c`
 
 ```c
 if (s_started && !tx) { update_plot(); wf_push(); }
 ```
 
-发射时电台不接收、档位也已降到 `low`，画了也没用，把 CPU 让给网络。
+While transmitting the radio is not receiving and the tier is already `low`, so
+drawing buys nothing; the CPU goes to the network instead.
 
 ---
 
-### 11. LVGL 绘制缓冲 8 → 12 行
+### 11. LVGL draw buffer 8 → 12 lines
 
-**文件**：`components/bsp/src/bsp_display_lvgl.c`
+**File**: `components/bsp/src/bsp_display_lvgl.c`
 
-`double_buffer = false`，flush 是"渲染→阻塞等 SPI"，8 行时 40 行瀑布要 5 轮往返，12 行只要 4 轮。
-占 5.6 KB 连续内部 RAM（原 3.8 KB）。
+With `double_buffer = false` a flush means "render, then block on SPI": at 8
+lines a 40-row waterfall needs 5 round trips, at 12 lines only 4. It costs
+5.6 KB of contiguous internal RAM (was 3.8 KB).
 
-**实测**：CPU 无变化（34–37%），但丢帧 0.46% → 0%。
-**注意**：首次采样 `largest` 曾到 29K，接近 TLS 需要的 16K 的 2 倍余量。
-
----
-
-## 二、已回退的改动
-
-### A. 音频环形缓冲 8 KB → 16 KB
-
-**为什么试**：丢帧全是 `full`，以为容量不够。
-**结果**：丢帧率不变（3.0% → 10.36%），`largest` 从 42K 掉到 25K。
-**结论**：不是容量问题。已回退。
+**Measured**: no CPU change (34–37%), but dropped frames 0.46% → 0%.
+**Watch**: the first sample of `largest` reached 29K, close to the 2× margin over
+the 16K TLS needs.
 
 ---
 
-### B. `rb_get` 批量取帧
+## 2. Changes that were reverted
 
-**为什么试**：推测"一帧一次取锁+阻塞写 I2S，追不上 20 ms 到达节奏"。
-**结果**：单独试过一次，丢帧 0.28% → 2.43%，无改善。已回退。
+### A. Audio ring buffer 8 KB → 16 KB
 
----
-
-### C. `rb_put` 加 spin + yield 锁
-
-**为什么试**：推测锁竞争导致丢帧。
-**结果**：丢帧反而上升（11% → 13%）。计数器显示 `lock=0`，全是 `full`，方向就错了。已回退。
+**Why tried**: every drop counted as `full`, so capacity looked too small.
+**Result**: drop rate unchanged (3.0% → 10.36%) and `largest` fell 42K → 25K.
+**Conclusion**: not a capacity problem. Reverted.
 
 ---
 
-### D. 上行队列（16 槽静态环形，单写者）
+### B. Batched frame reads in `rb_get`
 
-**为什么试**：`esp_websocket_client` 的锁跨任务争用，`send_bin` 返回 `-1`。
-**结果**：
-- 刚加时出现过一次完美发射（`frames=491 sendfail=0`）
-- 随后退化为 `err=-1`（实为队列满），加大到 16 槽仍不够
-- 为修它又改了 net 任务轮询、TX 状态机，越改越乱
-- 用户反馈"越修越坏"
-
-**结论**：在已经能工作的架构上叠加机制是错的。已全部回退（在 `stash@{0}` 中可查）。
+**Why tried**: hypothesised that "one lock acquisition and one blocking I2S
+write per frame cannot keep up with a 20 ms arrival cadence".
+**Result**: tried alone, dropped frames went 0.28% → 2.43%, no improvement.
+Reverted.
 
 ---
 
-### E. LVGL 任务睡眠补丁（`tools/patch_lvgl_port.sh`）
+### C. spin + yield lock around `rb_put`
 
-**为什么试**：读到 `esp_lvgl_port` 里 `vTaskDelay(1)` 固定 1 tick，以为每秒空转 1000 次。
-**结果**：**判断错误**。循环开头的 `xEventGroupWaitBits(..., task_delay_ms)`
-**已经按 LVGL 要求睡过了**，那个 `vTaskDelay(1)` 只是多睡 1 ms。真实频率约 20 次/秒。
-补丁无效，已删除，服务器上的补丁也还原了。
-
----
-
-### F. I2S DMA 缓冲 90 ms → 150 ms
-
-**文件**：`components/bsp/src/bsp_audio.c`（`dma_desc_num` 6→8，`dma_frame_num` 240→300）
-
-**为什么试**：推测卡顿来自 `auto_clear_after_cb` 在 DMA 空块时插静音。
-**结果**：用户实测"还是不行"。已回退。
+**Why tried**: hypothesised lock contention was dropping frames.
+**Result**: drops went up (11% → 13%). The counters showed `lock=0` and all drops
+were `full`, so the hypothesis was simply wrong. Reverted.
 
 ---
 
-## 三、文档
+### D. Uplink queue (16-slot static ring, single writer)
 
-| 文件 | 内容 |
+**Why tried**: `esp_websocket_client`'s lock is contended across tasks and
+`send_bin` returned `-1`.
+**Result**:
+- One perfect transmission right after it was added (`frames=491 sendfail=0`)
+- Then it degraded to `err=-1` (actually a full queue); raising it to 16 slots
+  was still not enough
+- Fixing that meant changing the net task polling and the TX state machine, and
+  it got messier as it went
+- User feedback: "it gets worse the more you fix it"
+
+**Conclusion**: layering a mechanism onto an architecture that already works is
+the wrong move. All reverted (still in `stash@{0}`).
+
+---
+
+### E. LVGL task sleep patch (`tools/patch_lvgl_port.sh`)
+
+**Why tried**: read `vTaskDelay(1)` inside `esp_lvgl_port` and assumed it spun
+1000 times a second.
+**Result**: **wrong reading**. The loop already sleeps through
+`xEventGroupWaitBits(..., task_delay_ms)` as LVGL requires; that `vTaskDelay(1)`
+just adds one more millisecond. The real rate is about 20 per second. The patch
+did nothing; it was deleted and the copy on the server reverted.
+
+---
+
+### F. I2S DMA buffer 90 ms → 150 ms
+
+**File**: `components/bsp/src/bsp_audio.c` (`dma_desc_num` 6→8,
+`dma_frame_num` 240→300)
+
+**Why tried**: hypothesised that stutter came from `auto_clear_after_cb`
+inserting silence when a DMA block ran dry.
+**Result**: the user measured it and reported "still broken". Reverted.
+
+---
+
+## 3. Documents
+
+| File | Content |
 |---|---|
-| `docs/optimization-notes.md` | 性能实测数据、已推翻的假设、方法论 |
-| `docs/UI.md` | 当前 UI 布局/配色/字体/各区块细节/改动检查清单 |
+| `docs/optimization-notes.md` | Measured performance data, refuted hypotheses, method |
+| `docs/UI.md` | Current UI layout, palette, fonts, per-region details, change checklist |
 
-两份文档都标注了 **实测 / 推测 / 已推翻**，避免下次重走弯路。
+Both documents label **measured / hypothesised / refuted** so the next pass does
+not repeat the same detours.
 
 ---
 
-## 四、回退点
+## 4. Rollback point
 
 ```
-802bbc8  ← 一个稳定的提交点（界面改动 + TX 修复，接收正常）
+802bbc8  <- a stable commit (UI changes + TX fix, receive works)
 ```
 
-回退到 17:00 左右状态需要撤销的未提交改动：
+To return to the state around 17:00 these uncommitted changes must be undone:
 
-| 文件 | 撤销内容 |
+| File | Revert |
 |---|---|
-| `components/bsp/src/bsp_audio.c` | DMA 缓冲 8×300 → 6×240 |
-| `components/bsp/src/bsp_display_lvgl.c` | 绘制缓冲 12 → 8 行 |
-| `main/mrrc_audio.c` | 环形 16K→8K、批量取帧→单帧（已回退过，确认状态） |
-| `sdkconfig.defaults` | 字模配置对齐 |
+| `components/bsp/src/bsp_audio.c` | DMA buffer 8×300 → 6×240 |
+| `components/bsp/src/bsp_display_lvgl.c` | draw buffer 12 → 8 lines |
+| `main/mrrc_audio.c` | ring 16K→8K, batched reads→single frame (already reverted once; confirm) |
+| `sdkconfig.defaults` | align the font configuration |
 
-`docs/UI.md` 与 `docs/optimization-notes.md` 是新增文档，保留。
+`docs/UI.md` and `docs/optimization-notes.md` are new documents; keep them.
 
 ---
 
-## 五、遗留问题
+## 5. Open problems
 
-**接收仍有卡顿**，以下方向已排除：
+**Receive still stutters.** These directions are ruled out:
 
-- 应用层环形缓冲容量
-- 锁竞争
-- 批量取帧
-- I2S DMA 深度（90ms / 150ms 都试过）
+- Application-level ring buffer capacity
+- Lock contention
+- Batched frame reads
+- I2S DMA depth (both 90 ms and 150 ms tried)
 
-**未试过的方向**：
+**Not yet tried**:
 
-1. `auto_clear_after_cb = false`（不让 DMA 自动填静音）
-2. ES8311 的窗口/静音/功率配置
-3. 服务器下行节奏是否存在突发合并
-4. 用示波器或逻辑分析仪直接看 I2S 波形
+1. `auto_clear_after_cb = false` (stop the DMA from filling silence itself)
+2. ES8311 window/mute/power configuration
+3. Whether the server's downlink cadence merges bursts
+4. Looking at the I2S waveform directly with a scope or logic analyser
