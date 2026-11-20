@@ -6,13 +6,15 @@
 
 `.github/workflows/build-firmware.yml` builds and publishes firmware for tags and supports manual dispatch. Ordinary branch pushes do not trigger it. Keep this page synchronized with the workflow.
 
-The build job restores ccache, runs `./tools/validate.sh --firmware` with ESP-IDF 5.5.3 for ESP32-C3, verifies the bootloader, partition table, and application at the offsets generated in `flash_args`, checks the 8 MB Flash arguments and configured partition layout, then uploads `FoloToy-AI-Passport-full.bin`. The repository default places these images at `0x0`, `0x8000`, and `0x10000`; user-defined partition tables may change the application offset. A separate least-privilege release job publishes that artifact only for a tag.
+The build job restores ccache, runs `./tools/validate.sh --firmware` with ESP-IDF 5.5.3 for ESP32-C3, verifies the bootloader, partition table, and application at the offsets generated in `flash_args`, and checks the 8 MB Flash arguments and configured partition layout. The repository default places these images at `0x0`, `0x8000`, and `0x10000`; user-defined partition tables may change the application offset. The build is a gate on the source tree: it publishes no image.
+
+Releases are source-only. A CI-built image cannot be configured for a specific terminal — Wi-Fi and server credentials live in the gitignored `sdkconfig.defaults.local` (see [doc-conventions](../../contribution/doc-conventions.md)), so such an image would boot, log `no SSID configured`, and never reach the radio. GitHub attaches the source archives to each release automatically; build the image yourself from the tag.
 
 All Actions are pinned to full commit SHAs. The build job has `contents: read`; only the tag release job receives `contents: write`.
 
 ## Browser flashing
 
-Open `https://ai-passport.folotoy.cn/tools/web-flasher/`, connect the USB JTAG/serial device, select the release's merged `FoloToy-AI-Passport-full.bin`, choose a baud rate such as 460800, and write it from `0x0`. The browser performs local writing and verification; it does not upload the firmware file.
+The web flasher stays available for images you built yourself. Open `https://ai-passport.folotoy.cn/tools/web-flasher/`, connect the USB JTAG/serial device, select your merged `FoloToy-AI-Passport-full.bin`, choose a baud rate such as 460800, and write it from `0x0`. The browser performs local writing and verification; it does not upload the firmware file.
 
 For board and flashing details, see [the hardware development guide](../../hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.md).
 
