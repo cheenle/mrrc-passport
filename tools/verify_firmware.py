@@ -11,11 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-REQUIRED_IMAGES = (
-    "bootloader/bootloader.bin",
-    "partition_table/partition-table.bin",
-    "FoloToy-AI-Passport.bin",
-)
+BOOTLOADER_IMAGE = "bootloader/bootloader.bin"
+PARTITION_TABLE_IMAGE = "partition_table/partition-table.bin"
+
+# The application image name follows PROJECT_NAME, so it must not be hard-coded:
+# the project was renamed from FoloToy-AI-Passport to mrrc-terminal and this
+# check kept looking for the old file, which is why every firmware build failed.
+FIXED_IMAGES = (BOOTLOADER_IMAGE, PARTITION_TABLE_IMAGE)
 
 FLASH_SIZE = 8 * 1024 * 1024
 PARTITION_TABLE_SIZE = 0xC00
@@ -125,8 +127,22 @@ def verify_flash_images(
     return image_sizes
 
 
+def app_image_name(image_offsets: dict[str, int]) -> str:
+    """Return the application image: the one entry that is neither of the fixed two."""
+    extras = [name for name in image_offsets if name not in FIXED_IMAGES]
+    if len(extras) != 1:
+        raise ValueError(
+            f"flash_args must contain exactly one application image, got {extras}"
+        )
+    return extras[0]
+
+
 def verify_firmware_layout(
-    merged: bytes, build_dir: Path, partition_table_offset: int, app_offset: int
+    merged: bytes,
+    build_dir: Path,
+    partition_table_offset: int,
+    app_offset: int,
+    app_image: str,
 ) -> list[Partition]:
     """Validate the configured partition table and its application image."""
     table = merged[
@@ -155,7 +171,7 @@ def verify_firmware_layout(
             f"application offset 0x{app_offset:x} must match exactly one app partition"
         )
     app_partition = matching_apps[0]
-    app_path = build_dir / "FoloToy-AI-Passport.bin"
+    app_path = build_dir / app_image
     app_size = app_path.stat().st_size
     if app_size > app_partition.size:
         raise ValueError(
@@ -178,8 +194,9 @@ def verify_extra_image_partitions(
     partitions: list[Partition],
 ) -> None:
     """Allow custom images anywhere within one partition, never across its end."""
+    required = set(FIXED_IMAGES) | {app_image_name(image_offsets)}
     for name, offset in image_offsets.items():
-        if name in REQUIRED_IMAGES:
+        if name in required:
             continue
         end = offset + image_sizes[name]
         if not any(part.offset <= offset and end <= part.end for part in partitions):
@@ -200,10 +217,11 @@ def main() -> int:
         if "--flash_size 8MB" not in flash_args:
             raise ValueError("flash_args does not select the required 8 MB flash size")
         image_offsets = parse_flash_args(flash_args)
-        missing = [name for name in REQUIRED_IMAGES if name not in image_offsets]
+        missing = [name for name in FIXED_IMAGES if name not in image_offsets]
         if missing:
             raise ValueError(f"flash_args is missing required images: {missing}")
-        if image_offsets["bootloader/bootloader.bin"] != 0:
+        app_image = app_image_name(image_offsets)
+        if image_offsets[BOOTLOADER_IMAGE] != 0:
             raise ValueError("the merged bootloader must start at 0x0")
         if merged_path.stat().st_size > FLASH_SIZE:
             raise ValueError("merged firmware exceeds 8 MB")
@@ -213,7 +231,8 @@ def main() -> int:
             merged,
             build_dir,
             image_offsets["partition_table/partition-table.bin"],
-            image_offsets["FoloToy-AI-Passport.bin"],
+            image_offsets[app_image],
+            app_image,
         )
         verify_extra_image_partitions(image_offsets, image_sizes, partitions)
     except (OSError, UnicodeDecodeError, ValueError) as error:
