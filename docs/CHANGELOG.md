@@ -16,7 +16,7 @@
 
 - Releases are source-only from now on: the tag workflow still builds and verifies the image as a gate, but it publishes no firmware artifact, and the GitHub Release carries only the automatically attached source archives. A CI image cannot hold this terminal's credentials, so a prebuilt image would boot and never reach the radio.
 
-- Stop losing downlink audio frames: the 8 KB PCM ring becomes 16 KB (0.26 s -> 0.51 s) so the TCP backlog at session start has somewhere to land, the WebSocket receive buffer goes 4 KB -> 8 KB so a 1701-byte spectrum frame no longer back-pressures the socket (the server measured a 5.8 s pump stall), and the link is now half duplex — the spectrum tier drops to `low` and scope frames are discarded while keyed. Measured on the live server: `err=0 drop=0` at 49.9 frames/s.
+- Stop losing downlink audio frames: the 8 KB PCM ring becomes 16 KB (0.26 s -> 0.51 s) so the TCP backlog at session start has somewhere to land, the WebSocket receive buffer goes 4 KB -> 8 KB so a 1701-byte spectrum frame no longer back-pressures the socket (the server measured a 5.8 s pump stall), and the link is now half duplex — the spectrum tier drops to `low` and scope frames are discarded while keyed. Measured on the live server by the author: `err=0 drop=0` at 49.9 frames/s. On our bench unit the same build still loses ~2%, so a second cause remains open.
 
 - Add `probe/`, the throwaway bring-up firmware for the next-generation touch handheld (ILI9341 + FT6336G + ES8311), with its design document. It is a separate ESP-IDF project under `probe/` and is not part of the `mrrc-terminal` image.
 
