@@ -27,6 +27,8 @@ CONFIG_LV_FONT_MONTSERRAT_14=y
 # 频率用 28 号（240 宽的屏上 "7.215.00" 约 150 px）
 CONFIG_LV_FONT_MONTSERRAT_28=y
 # 频率 40 号（28 x 1.5）
+# mrrc_ui.c 的频率大字用原生 44 px（缩放 28 号会被裁切，见 802bbc8 的注释）。
+CONFIG_LV_FONT_MONTSERRAT_44=y
 # LVGL 分配器：默认改用系统堆的标准 malloc/realloc/free。
 # 内置 24KB 静态池在复杂圆角/蒙版绘制时会耗尽，lv_malloc 返回 NULL 后 LVGL 断言死循环，
 # 饿死 IDLE 触发 TWDT 冻屏（真机已复现：圆角蒙版表分配失败）。系统堆约 130KB 可用，
@@ -78,7 +80,14 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 # ── LVGL 性能（实测，见 docs/optimization-notes.md 3.4）────────────────
 # 官方指南：帧缓冲 <10% 屏面积有"严重负面影响"。240x320 的 10% = 32 行。
-# 配套把最热的 LVGL 函数放进 IRAM，免去 flash cache 等待。
 # 绘制缓冲行数在 components/bsp/src/bsp_display_lvgl.c 的
 # BSP_LVGL_DRAW_BUFFER_LINES 里，不在 sdkconfig。
-CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y
+#
+# 不要再打开 CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM。它曾把"最热的 LVGL 函数"
+# 放进 IRAM 换掉 flash cache 等待，但 lvgl/lvgl 的版本约束是 ^9.5.0，实际会解析到
+# 9.6.x，而 9.6 给大量绘制函数加了 LV_ATTRIBUTE_FAST_MEM。于是这一项会把
+# ~117 KB 的代码搬进 SRAM（C3 的 IRAM/DRAM 是同一块 400 KB）。实测后果：
+#   DRAM 占用 170 KB -> 287 KB，启动堆 201 KB -> 88 KB，
+#   esp_wifi_init() 直接 ESP_ERR_NO_MEM，设备无限重启。
+# 若要恢复该性能选项，必须先把 lvgl 钉到 9.5.*，并重新验证启动堆。
+# CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM is not set
