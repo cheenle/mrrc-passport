@@ -23,11 +23,8 @@ CONFIG_LV_COLOR_DEPTH_16=y
 # transfer complete within the same budget.
 CONFIG_LV_DEF_REFR_PERIOD=30
 CONFIG_LV_FONT_MONTSERRAT_12=y
-CONFIG_LV_FONT_MONTSERRAT_14=y
-# 频率用 28 号（240 宽的屏上 "7.215.00" 约 150 px）
-CONFIG_LV_FONT_MONTSERRAT_28=y
-# 频率 40 号（28 x 1.5）
-# mrrc_ui.c 的频率大字用原生 44 px（缩放 28 号会被裁切，见 802bbc8 的注释）。
+# 只编 12 和 44 两套字模：主文字用 12，频率大字用原生 44 px
+# （用 transform_scale 放大 28 号会被圆角遮罩裁切，见 802bbc8 的注释）。
 CONFIG_LV_FONT_MONTSERRAT_44=y
 # LVGL 分配器：默认改用系统堆的标准 malloc/realloc/free。
 # 内置 24KB 静态池在复杂圆角/蒙版绘制时会耗尽，lv_malloc 返回 NULL 后 LVGL 断言死循环，
@@ -47,6 +44,18 @@ CONFIG_LWIP_IPV6_AUTOCONF=y
 # 终端只需要一个 STA 连接，不要 mesh/企业认证那套。
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
 CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+
+# --- lwIP TCP 窗口 ---
+# 默认 5760 B 是 4×MSS，对这条链路根本不成立：下行是 31 KB/s 音频 + 18 KB/s 频谱
+# = 50 KB/s，而实测 RTT 54–211 ms（平均 82）。吞吐 ≈ WND/RTT，5760/0.082 ≈ 70 KB/s
+# 只在平均 RTT 下勉强够，RTT 一尖峰就掉到 27 KB/s 以下，服务端的 write 被反压
+# （它的日志里叫 pump stall），音频就以突发形式到达、设备侧卡顿。
+# 实测：同 Wi-Fi 的 Linux 盒子能稳定收到 50 帧/秒音频；设备只有 18.5 帧/秒。
+# 实测：把窗口加到 16384 没有提高设备的接收帧率（18.5 → 20.2 帧/秒），
+# 反而让丢帧从 2.2% 升到 24.6% —— 瓶颈在设备的 I2S 消费端，不在链路。
+# 保持默认值，别再加。
+# CONFIG_LWIP_TCP_WND_DEFAULT=5760
+# CONFIG_LWIP_TCP_SND_BUF_DEFAULT=5760
 
 # --- TLS ---
 # TLS 会话是本项目最贵的一项固定开销（每条连接十几 KB）。已定策略：V1 只开
