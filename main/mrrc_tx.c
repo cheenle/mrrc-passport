@@ -42,6 +42,14 @@ static const char *TAG = "tx";
 #define TX_HB_MS        1500
 
 static volatile bool s_want_tx;
+
+/* Uplink timing counters.  During transmission the loop must hand one 20 ms
+ * frame to the socket every 20 ms; anything that makes it wait shows up at the
+ * far end as chopped audio.  These record how bad it gets. */
+static uint32_t s_send_max_us;      /* worst esp_websocket_client_send_bin() */
+static uint32_t s_send_slow;        /* sends that took > 30 ms */
+static uint32_t s_loop_max_us;      /* worst read->read interval */
+static uint32_t s_loop_stalls;      /* intervals > 40 ms (one frame missed) */
 static TaskHandle_t s_task;
 
 static char s_last_evt[80] = "none";
@@ -86,8 +94,14 @@ static void tx_task(void *arg)
     int64_t last_hb = 0;
     const int64_t started = esp_timer_get_time();
 
+    int64_t prev_iter = 0;
     while (s_want_tx) {
         const int64_t now = esp_timer_get_time();
+        if (prev_iter) {
+            const uint32_t dt = (uint32_t)(now - prev_iter);
+            if (dt > s_loop_max_us) s_loop_max_us = dt;
+            if (dt > 40000) s_loop_stalls++;
+        }
         if (now - last_hb > TX_HB_MS * 1000LL) {
             last_hb = now;
             mrrc_net_send_txhb();
@@ -121,17 +135,26 @@ static void tx_task(void *arg)
         *tag = AUDIO_TAG_PCM_16K;
         const size_t bytes = 2 + TX_FRAME_16K * sizeof(int16_t);
 
-        if (mrrc_net_send_bin(buf, bytes)) {
+        const int64_t t_send = esp_timer_get_time();
+        const bool sent = mrrc_net_send_bin(buf, bytes);
+        const uint32_t send_us = (uint32_t)(esp_timer_get_time() - t_send);
+        if (send_us > s_send_max_us) s_send_max_us = send_us;
+        if (send_us > 30000) s_send_slow++;
+        if (sent) {
             s_tx_frames++;
         } else {
             s_send_fail++;
             vTaskDelay(pdMS_TO_TICKS(20));
         }
+        prev_iter = esp_timer_get_time();
     }
 
     mrrc_net_send_text_stop();
-    note("tx done: frames=%u sendfail=%u readfail=%u peak=%d",
-         s_tx_frames, s_send_fail, s_read_fail, s_peak_max);
+    note("tx done: frames=%u sendfail=%u readfail=%u peak=%d "
+         "send_max=%u us slow=%u loop_max=%u us stalls=%u",
+         s_tx_frames, s_send_fail, s_read_fail, s_peak_max,
+         (unsigned)s_send_max_us, (unsigned)s_send_slow,
+         (unsigned)s_loop_max_us, (unsigned)s_loop_stalls);
 
     s_want_tx = false;
     s_task = NULL;
@@ -172,6 +195,15 @@ bool mrrc_tx_key(bool on)
 bool mrrc_tx_active(void) { return s_want_tx; }
 
 const char *mrrc_tx_last_event(void) { return s_last_evt; }
+
+void mrrc_tx_link_stats(unsigned *send_max_us, unsigned *slow, unsigned *loop_max_us,
+                        unsigned *stalls)
+{
+    if (send_max_us) *send_max_us = s_send_max_us;
+    if (slow)        *slow        = s_send_slow;
+    if (loop_max_us) *loop_max_us = s_loop_max_us;
+    if (stalls)      *stalls      = s_loop_stalls;
+}
 
 void mrrc_tx_stats(unsigned *keys, unsigned *fails, unsigned *frames,
                    unsigned *send_fail, unsigned *read_fail, unsigned *link_downs)

@@ -458,6 +458,10 @@ void app_main(void)
                          (unsigned)lwr, (unsigned)lused, (unsigned)16384,
                          (unsigned)mrrc_audio_rebuffers(), mrrc_net_rssi());
             }
+            unsigned tsm = 0, tslow = 0, tloop = 0, tstall = 0;
+            mrrc_tx_link_stats(&tsm, &tslow, &tloop, &tstall);
+            ESP_LOGI(TAG, "txlink: send_max=%u us slow=%u loop_max=%u us stalls=%u",
+                     (unsigned)tsm, (unsigned)tslow, (unsigned)tloop, (unsigned)tstall);
             p_rx = lrx; p_un = lun; p_us = now_us;
             /* Per-task CPU needs the tick hook; the link counters above do not,
              * so keep the two switches independent. */
