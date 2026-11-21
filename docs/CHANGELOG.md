@@ -12,6 +12,27 @@
 
 ## Unreleased
 
+## Unreleased
+
+- Remove the stutter in both directions. Five independent causes, each measured
+  on the board and on the server:
+  - the downlink was limited by the terminal's receive queues, not the link —
+    `TCP_RECVMBOX_SIZE` 6, `TCP_OOSEQ_MAX_PBUFS` 4 and `RX_BA_WIN` 6 were what
+    filled first, not the TCP window; the device now receives 49 KB/s with the
+    same client-visible rate as a reference client on the same Wi-Fi;
+  - playback started from an empty ring, so every network gap starved the DMA —
+    it now pre-buffers 160 ms and re-buffers after 200 ms dry;
+  - the server's `max pump stall` fell from 5791 ms to 3 ms;
+  - the uplink ran with Nagle and a four-MSS send buffer: 31% of audio sends
+    blocked over 30 ms, worst 89 ms. `tools/patch_ws_nodelay.sh` sets
+    TCP_NODELAY and `TCP_SND_BUF_DEFAULT` doubles; sends now block at most
+    9–17 ms and the server reports `queue_drops=0` on every session;
+  - transmit audio was clipping 5% of samples because the device's analog PGA
+    (+30 dB) and the server's software gain (+12 dB) stacked. The software gain
+    was an identity operation with a headroom cost; at 0 dB a full transmission
+    adds zero clipped samples.
+  See [transport tuning](transport-tuning.md) for the measurements.
+
 ## v1.2.0 - 2026-11-20
 
 - Releases are source-only from now on: the tag workflow still builds and verifies the image as a gate, but it publishes no firmware artifact, and the GitHub Release carries only the automatically attached source archives. A CI image cannot hold this terminal's credentials, so a prebuilt image would boot and never reach the radio.

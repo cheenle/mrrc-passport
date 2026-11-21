@@ -10,6 +10,22 @@
 
 ## Unreleased
 
+## Unreleased
+
+- 消除收发两个方向的卡顿。五个互相独立的原因，每一条都在设备和服务器上实测过：
+  - 下行受限于终端的接收队列而不是链路——先被填满的是 `TCP_RECVMBOX_SIZE`（6）、
+    `TCP_OOSEQ_MAX_PBUFS`（4）和 `RX_BA_WIN`（6），不是 TCP 窗口；现在设备能收满
+    49 KB/s，与同 Wi-Fi 的对照客户端完全一致；
+  - 播放从空环开始，每个网络空隙都会饿死 DMA——改为先攒 160 ms 再播，干涸 200 ms
+    后重新攒；
+  - 服务端的 `max pump stall` 从 5791 ms 降到 3 ms；
+  - 上行一直开着 Nagle 且发送缓冲只有 4 个 MSS：31% 的音频发送阻塞超过 30 ms、
+    最坏 89 ms。`tools/patch_ws_nodelay.sh` 打开 TCP_NODELAY，`TCP_SND_BUF_DEFAULT`
+    翻倍；现在最坏 9–17 ms，服务端每次都报 `queue_drops=0`；
+  - 发射音频有 5% 样本削波，因为设备模拟 PGA（+30 dB）与服务端软件增益（+12 dB）
+    叠加。那级软件增益只是恒等放大却吃掉了余量；设为 0 dB 后整次发射新增削波为 0。
+  实测数据见[传输链路调优](transport-tuning.zh_CN.md)。
+
 ## v1.2.0 - 2026-11-20
 
 - 发布改为只发源码：tag 流水线仍然编译并验证镜像作为门禁，但不再上传固件产物，GitHub Release 只带自动附上的源码压缩包。CI 镜像无法携带本终端的凭证，预编译镜像刷上去会启动但永远连不上电台。
