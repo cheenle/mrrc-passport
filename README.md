@@ -12,7 +12,7 @@ This is not a port. The BSP drivers come from `ref/ai-passport` (FoloToy's open
 baseline); everything else — the audio path, the protocol, the UI, the PTT state
 machine, the key mapping — was rebuilt around what this chip can actually do.
 
-## Status (v1.2.0)
+## Status (v1.2.1)
 
 | Feature | State |
 |---|---|
@@ -30,10 +30,13 @@ machine, the key mapping — was rebuilt around what this chip can actually do.
 | Network: `cnham-MM` + `w103d.vlsc.net` (IPv6-only host, port 8888) | ✅ |
 | Battery / status / S-meter / channel name | ✅ |
 
-Audio no longer loses frames on the wire: the PCM ring is 16 KB (0.51 s) and the
-WebSocket receive buffer is 8 KB, and the link is half duplex, so the spectrum
-stops while keyed. On this bench unit a residual ~2% still drops; see
-[Known issues](#known-issues).
+Audio no longer stutters in either direction. Five independent causes were
+measured and fixed in 1.2.1 — receive queueing behind the TCP window, playback
+starting from an empty ring, the uplink running under Nagle, a four-MSS send
+buffer, and a software TX gain that only produced clipping. Measured after:
+`rx 31 KB/s` (the same rate a reference client on the same Wi-Fi sees),
+`queue_drops=0` on every transmission, and unsent-blocking down from 31% of
+frames to none. The numbers are in [transport tuning](docs/transport-tuning.md).
 
 The interface spec is in [`docs/UI.md`](docs/UI.md).
 

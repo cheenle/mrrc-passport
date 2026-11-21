@@ -451,10 +451,15 @@ plot: v=0..0  y=44..44  raw0=109 raw1=115    <- raw 有值，>>8 后全 0
 BSP_LVGL_DRAW_BUFFER_LINES   24          显示缓冲区行数
 CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM  y LVGL 热函数进 IRAM
 FFT_ALPHA_Q8                 77 (=0.30)  Q8 定点 EMA
-REFRESH_MS                   300         3.3 Hz
+REFRESH_MS                   190         5.26 Hz（见 §3.6）
 WF_H                         40          瀑布行数 (RGB565 18.8 KB)
 PLOT_H                       45          频谱高
-AUD_RB_BYTES                 8192        ~250 ms 抖动缓冲
+AUD_RB_BYTES                 16384       ~0.51 s，另加 160 ms 预缓冲（§16）
+CONFIG_LWIP_TCP_WND_DEFAULT           11520  8 个 MSS，连同它背后的队列（§16）
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT       11520  上行，8 个 MSS（§16）
+CONFIG_LWIP_TCP_RECVMBOX_SIZE         8      原 6，真正先被填满的那个
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS       8      原 4
+CONFIG_ESP_WIFI_RX_BA_WIN             16     原 6
 swapp_bytes                  false       面板侧 RAMCTRL(0xB0) 小端
 CONFIG_COMPILER_OPTIMIZATION_PERF      y  -O2
 CONFIG_MRRC_PROFILE                     n
@@ -565,3 +570,30 @@ LVGL 光栅化的是 239 条线段。这条建议基于「传了 850 点」的�
 | RX 采样率 | 16 kHz，服务器 44.1→48→16 双重采样（可再优化，收益小） |
 | TX 采样率 | **16 kHz**（codec 在 48k 下麦克风失效，只能 16k） |
 | 音频丢帧 | `err=0`；`drop` 在 190 ms 下小幅增长，听感无断续 |
+
+---
+
+## 16. 传输链路那一轮（2026-11-21）
+
+最后一轮卡顿排查跟 CPU、内存、渲染都没关系，问题在传输链路。完整的实测数据、
+对照客户端的做法以及服务端计数见[传输链路调优](transport-tuning.zh_CN.md)。改了什么、
+换回什么，汇总如下：
+
+| 原因 | 修法 | 效果 |
+|---|---|---|
+| TCP 窗口背后的接收队列先满（`RECVMBOX` 6、`OOSEQ` 4、`RX_BA_WIN` 6） | 8 / 8 / 16，窗口 8 个 MSS | 设备收满 `31 KB/s` 音频、`49 KB/s` 总量——与同 Wi-Fi 的对照客户端一致 |
+| 播放从空环开始，每个网络空隙都饿死 DMA | 预缓冲 160 ms，干涸 200 ms 后重攒 | 环空唤醒 3–5 次/秒 → 0–2 次/秒 |
+| 上行跑在 Nagle 下，发送缓冲只有 4 个 MSS | `tools/patch_ws_nodelay.sh` 加 `SND_BUF` 11520 | 超过 30 ms 的发送 31% → 0；最坏 89 ms → 9–17 ms |
+| 软件发射增益叠在模拟 PGA 之上 | 服务端 `tx_mic_db` 12 → 0 dB | 削波样本 5% → 0，`peak` 100% → 40% |
+
+服务端自己的计数也对得上：每次发射 `frames == fed == written`、`queue_drops=0`、
+`write_err=0`，并且 `max pump stall` 从 5791 ms 降到 3 ms。
+
+这一轮有两个比数字更值钱的坑：
+
+1. **没有对照的计数器会骗人。** 前面三轮都在调缓冲，因为"设备只收到 26 KB/s"——
+   但它没有参照物。等同一个 Wi-Fi 上再开一个 `/WSterminal` 客户端，到底是服务端发得
+   少还是设备收得少，一眼就看出来了。**永远带一个对照客户端。**
+2. **峰值在上游时，降增益不会降削波。** 服务端增益 +12 → +3 dB 之后削波率反而升到
+   5.8%（原来 5.0%），正是这个反证说明峰值在 ADC 就已经顶到满量程。这个负面结果直接
+   指向了真正的原因。

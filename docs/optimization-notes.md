@@ -486,10 +486,15 @@ plot: v=0..0  y=44..44  raw0=109 raw1=115    <- raw has values, all zero after >
 BSP_LVGL_DRAW_BUFFER_LINES   24           draw buffer lines
 CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM  y LVGL hot functions into IRAM
 FFT_ALPHA_Q8                 77 (=0.30)  Q8 fixed-point EMA
-REFRESH_MS                   300         3.3 Hz
+REFRESH_MS                   190         5.26 Hz (see §3.6)
 WF_H                         40          waterfall rows (RGB565 18.8 KB)
 PLOT_H                       45          trace height
-AUD_RB_BYTES                 8192        ~250 ms jitter buffer
+AUD_RB_BYTES                 16384       ~0.51 s, plus a 160 ms pre-buffer (§16)
+CONFIG_LWIP_TCP_WND_DEFAULT           11520  8 MSS, with the queues behind it (§16)
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT       11520  uplink, 8 MSS (§16)
+CONFIG_LWIP_TCP_RECVMBOX_SIZE         8      was 6, the queue that actually filled
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS       8      was 4
+CONFIG_ESP_WIFI_RX_BA_WIN             16     was 6
 swapp_bytes                  false       panel-side RAMCTRL(0xB0) little-endian
 CONFIG_COMPILER_OPTIMIZATION_PERF      y  -O2
 CONFIG_MRRC_PROFILE                     n
@@ -499,9 +504,8 @@ CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS n
 Steady-state measurement at that point: `taskLVGL 23%`, `IDLE 56%`,
 `free 55K / largest 25K`, `err=0`, drops stable and not growing.
 
-> Note: `REFRESH_MS` and `AUD_RB_BYTES` above are the values at the time of
-> writing; §3.6 explains why the tick moved to 190 ms, and
-> [transport tuning](transport-tuning.md) records the 16 KB ring.
+> The values above are the current ones. §8 and the earlier sections keep the
+> numbers from the day they were written.
 
 ---
 
@@ -610,3 +614,34 @@ start (the 4880-byte `s_pts` waste, the 850-point array and `s_prev` are gone).
 | RX sample rate | 16 kHz; the server resamples 44.1→48→16 (could be improved, small gain) |
 | TX sample rate | **16 kHz** (the codec's microphone fails at 48k, so 16k it is) |
 | Audio drops | `err=0`; `drop` grows slightly at 190 ms, not audible as break-up |
+
+---
+
+## 16. The transport round (2026-11-21)
+
+The last round of stutter work was not about CPU, memory, or rendering at all: it
+was the transport. Full measurements, including the reference-client method and
+the server-side counters, are in [transport tuning](transport-tuning.md). Summary
+of what changed and what it bought:
+
+| Cause | Fix | Effect |
+|---|---|---|
+| receive queues behind the TCP window were full (`RECVMBOX` 6, `OOSEQ` 4, `RX_BA_WIN` 6) | 8 / 8 / 16, window 8 MSS | device receives `31 KB/s` audio, `49 KB/s` total — the same as a reference client on the same Wi-Fi |
+| playback started from an empty ring, so every network gap starved the DMA | 160 ms pre-buffer, re-buffer after 200 ms dry | ring-empty wakeups 3–5/s → 0–2/s |
+| the uplink ran under Nagle and a 4-MSS send buffer | `tools/patch_ws_nodelay.sh` plus `SND_BUF` 11520 | sends over 30 ms: 31% → 0; worst send 89 ms → 9–17 ms |
+| a software TX gain stacked on the analog PGA | server `tx_mic_db` 12 → 0 dB | clipped samples 5% → 0, `peak` 100% → 40% |
+
+The server's own counters agree: `frames == fed == written`, `queue_drops=0`,
+`write_err=0` per transmission, and `max pump stall` fell from 5791 ms to 3 ms.
+
+Two traps from this round, worth more than the numbers:
+
+1. **A counter without a reference lies.** Three earlier rounds tuned buffers
+   because the device "only received 26 KB/s". It was measured against nothing.
+   Once a second `/WSterminal` client ran on the same Wi-Fi, it was obvious
+   whether the server was sending less or the device was receiving less. Always
+   bring a reference client.
+2. **Lowering a gain does not lower clipping if the peaks are upstream.** The
+   server's gain went +12 → +3 dB and the clipping rate went *up* (5.0% → 5.8%),
+   which is what proved the peaks were already at the ADC. A negative result that
+   pointed straight at the real cause.
