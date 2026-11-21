@@ -240,6 +240,13 @@ void mrrc_audio_feed(const uint8_t *data, size_t len)
      *   0x00  48 kHz Int16 PCM  — the fallback when the server has no pcm16
      *   0x01  Opus              — not linked in; dropped on the floor
      */
+    if (s_muted) {
+        /* Transmitting: the radio is not receiving, and anything queued now is
+         * stale before the operator unkeys.  Dropping it here (rather than
+         * letting it fill the ring) also keeps the pre-buffer honest — otherwise
+         * playback restarts with up to half a second of old audio. */
+        return;
+    }
     if (data[0] == 0x02 || data[0] == 0x00) {
         rb_put(data + 1, len - 1);
     }
