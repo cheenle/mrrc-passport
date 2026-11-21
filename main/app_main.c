@@ -461,6 +461,14 @@ void app_main(void)
             const uint32_t wrx = mrrc_net_ws_rx_bytes();
             unsigned tsm = 0, tslow = 0, tloop = 0, tstall = 0;
             mrrc_tx_link_stats(&tsm, &tslow, &tloop, &tstall);
+            static uint32_t p_fb, p_fc;
+            uint32_t fb = 0, fc = 0;
+            bsp_display_flush_stats(&fb, &fc);
+            ESP_LOGI(TAG, "flush: %.0f KB/s, %.1f screens/s, %u flushes/s",
+                     (double)(fb - p_fb) / dt / 1024.0,
+                     (double)(fb - p_fb) / dt / 153600.0,
+                     (unsigned)((double)(fc - p_fc) / dt));
+            p_fb = fb; p_fc = fc;
             ESP_LOGI(TAG, "ws: total=%.1f KB/s (audio above is a subset)",
                      (double)(wrx - p_wrx) / dt / 1024.0);
             ESP_LOGI(TAG, "txlink: send_max=%u us slow=%u loop_max=%u us stalls=%u",

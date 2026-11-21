@@ -29,6 +29,9 @@ void bsp_display_backlight(uint8_t percent);
 // 已阻止 LVGL 刷屏，调用后必须立即进入 deep sleep 或重启。
 esp_err_t bsp_display_prepare_deep_sleep(void);
 
+/* 累计的 LVGL flush 字节数与次数，用于诊断重绘量（见 app_main 的 flush: 行）。 */
+void bsp_display_flush_stats(uint32_t *bytes, uint32_t *count);
+
 // ---------------------------------------------------------------------------
 // LVGL 接入(可选层)。必须先 bsp_display_init() 成功后再调。
 // 不想用 LVGL 的开发者可忽略本段,直接用 bsp_display_panel() 自己画。

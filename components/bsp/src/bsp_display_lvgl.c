@@ -38,6 +38,11 @@ static const char *TAG = "bsp_lvgl";
 #define BSP_LVGL_DRAW_BUFFER_LINES 24
 
 static lv_display_t *s_disp;
+/* Bytes handed to the panel, and how many flushes produced them.  A full screen
+ * is 240*320*2 = 153,600 B, so this says how many screens per second LVGL is
+ * actually redrawing — the number that decides whether its CPU share is sane. */
+static volatile uint32_t s_flush_bytes;
+static volatile uint32_t s_flush_count;
 static bool s_port_initialized;
 static bool s_port_init_failed;
 
@@ -52,6 +57,8 @@ static void rounded_flush_event(lv_event_t *event)
     }
 
     const int32_t width = lv_area_get_width(area);
+    s_flush_bytes += (uint32_t)width * lv_area_get_height(area) * sizeof(uint16_t);
+    s_flush_count++;
     if (draw_buf->header.stride < (uint32_t)width * sizeof(uint16_t)) return;
 
     for (int32_t y = area->y1; y <= area->y2; ++y) {
@@ -165,4 +172,10 @@ bool bsp_lvgl_lock(int timeout_ms) {
 }
 void bsp_lvgl_unlock(void) {
     if (s_disp) lvgl_port_unlock();
+}
+
+void bsp_display_flush_stats(uint32_t *bytes, uint32_t *count)
+{
+    if (bytes) *bytes = s_flush_bytes;
+    if (count) *count = s_flush_count;
 }
