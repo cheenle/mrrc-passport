@@ -1,325 +1,394 @@
-# MRRC 终端 V1 设计（ESP32-C3 / FoloToy AI Passport 硬件）
+<p align="right">
+  <a href="design-v1.zh_CN.md">简体中文</a> · <strong>English</strong>
+</p>
 
-> 状态：设计定稿，S0 已实现并编译通过（`main/app_main.c`），待上机量内存。
-> 本文只写确定性内容。凡是"待实测"的，都标出来，不拿估计当结论。
+# MRRC terminal V1 design (ESP32-C3 / FoloToy AI Passport hardware)
 
-## 1. 目标
+> Status: design settled; S0 is implemented and compiles (`main/app_main.c`).
+> This document states only what is certain. Anything "still to be measured" is
+> marked as such; estimates are never presented as conclusions.
 
-在 AI Passport 这块硬件上做一台**能收听、能发射、能调频率、能看频谱**的 MRRC 终端。
+> Later work changed parts of this document: the codec library was removed
+> (§6.1), the transport was retuned, and the ring grew to 16 KB. Where a section
+> describes the state on the day it was written, the current numbers are in
+> [transport tuning](transport-tuning.md) and
+> [optimisation notes](optimization-notes.md).
 
-V1 的初稿写着"不做频谱图、瀑布图"，理由是 C3 吃不下。**这个判断被推翻了**：
-优化完以后 taskLVGL 从 58% 降到 33–42%，40 行瀑布每行都是实测数据。
-现在的形态是完整的 handheld 界面（§8）。
+## 1. Goal
 
-真正不做的是：BLE（C3 只有 BLE 5.0，NimBLE 要 19 KB，得再砍 30 KB 内存才谈得上）、
-录音、以及任何需要 PSRAM 的东西。
+An MRRC terminal on the AI Passport hardware: **it listens, transmits, tunes, and
+shows a spectrum**.
 
-## 2. 硬件事实
+The first draft said "no spectrum, no waterfall" because the C3 could not afford
+them. **That judgement was overturned**: after optimisation `taskLVGL` went from
+58% to 33–42% and every one of the 40 waterfall rows is measured data. What
+exists now is a full handheld interface (§8).
 
-数据来源优先级：`components/bsp/include/bsp_pins.h` → BSP 实现 → 硬件指南 → 乐鑫 `soc_caps.h`。
+What is genuinely out of scope: BLE (the C3 has BLE 5.0 only, NimBLE needs 19 KB,
+and another 30 KB of memory would have to be found first), recording, and
+anything needing PSRAM.
 
-| 项 | 事实 | 来源 |
+## 2. Hardware facts
+
+Order of authority: `components/bsp/include/bsp_pins.h` → the BSP implementation
+→ the hardware guide → Espressif's `soc_caps.h`.
+
+| Item | Fact | Source |
 |---|---|---|
-| MCU | ESP32-C3，单核 RISC-V 160 MHz | `SOC_CPU_CORES_NUM (1U)` |
-| FPU | **无**，浮点走软件 | `esp32c3/soc_caps.h` 无 `SOC_CPU_HAS_FPU`（S3 有） |
-| RAM | 400 KB SRAM，**无 PSRAM** | 无 `SOC_SPIRAM_SUPPORTED` |
-| Flash | 8 MB XMC | `flash_id` 实测 |
-| I2S | **只有 1 个**，无 APLL | `SOC_I2S_NUM (1U)`、仅有 `SOC_I2S_SUPPORTS_PLL_F160M` |
-| 显示 | ST7789P3 240×320 RGB565，SPI2 80 MHz mode 0，圆形屏 | `bsp_pins.h` |
-| 音频 | ES8311 codec，I2C 0x18 + I2S0 全双工 | `bsp_pins.h` §音频 |
-| 按键 | UP/DOWN/OK 三键，**共用 GPIO0 一个 ADC 通道**（电阻梯） | `bsp_pins.h` §按键 |
-| 电池 | 500 mAh + CW2017 电量计（I2C 0x63） | `bsp_pins.h` §I2C |
-| 尺寸 | 60 × 95 × 8.5 mm，50 g | `docs/hardware-design/specifications.zh_CN.md` |
+| MCU | ESP32-C3, single RISC-V core at 160 MHz | `SOC_CPU_CORES_NUM (1U)` |
+| FPU | **none**, floating point is emulated | `esp32c3/soc_caps.h` has no `SOC_CPU_HAS_FPU` (the S3 does) |
+| RAM | 400 KB SRAM, **no PSRAM** | no `SOC_SPIRAM_SUPPORTED` |
+| Flash | 8 MB XMC | measured with `flash_id` |
+| I2S | **one** peripheral, no APLL | `SOC_I2S_NUM (1U)`, only `SOC_I2S_SUPPORTS_PLL_F160M` |
+| Display | ST7789P3 240×320 RGB565, SPI2 80 MHz mode 0, round panel | `bsp_pins.h` |
+| Audio | ES8311 codec, I2C 0x18 + I2S0 full duplex | `bsp_pins.h` §audio |
+| Keys | UP/DOWN/OK, **sharing one ADC channel on GPIO0** (resistor ladder) | `bsp_pins.h` §keys |
+| Battery | 500 mAh with a CW2017 gauge (I2C 0x63) | `bsp_pins.h` §I2C |
+| Size | 60 × 95 × 8.5 mm, 50 g | `docs/hardware-design/specifications.zh_CN.md` |
 
-## 3. 四条硬约束
+## 3. Four hard constraints
 
-这四条决定了架构，不能绕。
+These decide the architecture and cannot be worked around.
 
-### 3.1 全双工共享时钟 → 收发只能同一个采样率，而 48 kHz 采集是死的
+### 3.1 Full duplex shares the clock, and 48 kHz capture is dead
 
-ES8311 的 MCLK/BCLK/WS 由 I2S0 的 TX 和 RX 共用，物理上不存在"收 48 kHz、发 16 kHz"。
+The ES8311's MCLK/BCLK/WS are shared by I2S0's TX and RX; "receive at 48 kHz, send
+at 16 kHz" does not physically exist on this board.
 
-但**实测把这颗芯片的 48 kHz 采集判死了**：同一段采集代码、同一颗麦克风，只改 codec 采样率：
+And **measurement killed 48 kHz capture on this chip**: same capture code, same
+microphone, only the codec rate changed:
 
-| codec 采样率 | PCM 峰值（满量程 32767） |
+| Codec rate | PCM peak (full scale 32767) |
 |---|---|
 | 48 000 Hz | **468** |
 | 16 000 Hz | **12 708** |
 
-差 27 倍。`ref/ai-passport` 的音频 demo 全程只用 16 kHz，48 kHz 采集从未被验证过。
+A factor of 27. The `ref/ai-passport` audio demo only ever runs at 16 kHz;
+48 kHz capture was never verified.
 
-**决定**：codec 固定 **16 kHz**，永不切换。服务端要求 48 kHz，两侧靠软件重采样对接：
+**Decision**: the codec is fixed at **16 kHz** and never switches. The server
+wants 48 kHz, so software resampling bridges the two:
 
-- 下行：Opus 解码出 48 kHz → 3:1 抽取（三点平均，兼作抗混叠）→ 16 kHz 播放
-- 上行：麦克风 16 kHz → 3:1 零阶保持 → 48 kHz PCM（服务端自己再重采样到 44.1 kHz）
+- downlink: decode 48 kHz → 3:1 decimation (three-point average, doubling as the
+  anti-alias filter) → play at 16 kHz
+- uplink: microphone 16 kHz → 3:1 zero-order hold → 48 kHz PCM (the server
+  resamples again to 44.1 kHz)
 
-另一条纪律：**运行期不要调 `bsp_audio_set_format`**。它会 delete codec → 重建 → 重配 I2S，
-中间是一次可听的爆音加几十毫秒断流。
+Second rule: **never call `bsp_audio_set_format` at runtime**. It deletes and
+rebuilds the codec and reconfigures I2S, which is an audible pop plus tens of
+milliseconds of dropout.
 
-### 3.2 无 APLL → 时钟有约 0.16% 误差
+### 3.2 No APLL, so the clock is about 0.16% off
 
-MCLK = 256×fs，源只能取 PLL_F160M（160 MHz）：
+MCLK = 256×fs and the only source is PLL_F160M (160 MHz):
 
-| 名义 fs | 需要 MCLK | 实际分频 | 实际 fs |
+| Nominal fs | MCLK needed | Divider used | Actual fs |
 |---|---|---|---|
 | 16 kHz | 4.096 MHz | 39 | ≈16.03 kHz |
 | 48 kHz | 12.288 MHz | 13 | ≈48.08 kHz |
 
-**后果**：设备时钟比服务端快约 0.16%，长时间收听会让 jitter buffer 缓慢排空，约每 10 分钟偏 1 秒。Opus 的 PLC 与对端缓冲能吸收，但**必须实测 30 分钟以上**，不能只看短连接正常就收工。
+**Consequence**: the device clock runs about 0.16% fast, so a long listening
+session slowly drains the jitter buffer — roughly one second every ten minutes.
+Opus PLC and the peer's buffer absorb it, but it **must be measured over 30+
+minutes**; a short connection proving nothing is not the test.
 
-### 3.3 无 PSRAM → 所有缓冲进内部 RAM
+### 3.3 No PSRAM, so every buffer lives in internal RAM
 
-- 全屏 framebuffer 240×320×2 = 153.6 KB，**不可能**。
-- 现成的 LVGL 方案：40 行单缓冲 19.2 KB + 圆角蒙版运行时。
-- BSP 文档给出的实测基线：**系统堆约 130 KB 可用**（LVGL 在跑、无网络时）。
-- Wi-Fi 起来之后再扣 50–60 KB。
+- A full 240×320×2 framebuffer is 153.6 KB — **impossible**.
+- The LVGL arrangement used here: a 40-line single buffer (19.2 KB) plus the
+  rounded-mask work at runtime.
+- Measured baseline from the BSP documentation: **about 130 KB of system heap**
+  available (LVGL running, no network).
+- Wi-Fi then takes another 50–60 KB.
 
-### 3.4 单核无 FPU
+### 3.4 Single core, no FPU
 
-- Opus 必须定点（`CONFIG_OPUS_FLOATING_POINT=n`）。
-- 任何 float 运算（归一化、抗锯齿、AGC）都是软浮点，逐帧调用要当成本算。
-- Wi-Fi 协议栈和音频编解码共享同一个核：**音频任务必须能被抢占但不能被饿死**，PTT 心跳任务的优先级设计（V1 里是 `txhb`）要照抄 xz-02 的教训。
+- Opus must be fixed point (`CONFIG_OPUS_FLOATING_POINT=n`).
+- Any float work (normalisation, anti-aliasing, AGC) is software floating point
+  and must be budgeted per frame.
+- The Wi-Fi stack and the audio codec share the one core: **the audio task must
+  be preemptible but never starved**. The PTT heartbeat priority (V1 called it
+  `txhb`) follows the xz-02 lesson.
 
-## 4. 内存预算
+## 4. Memory budget
 
-### 4.1 静态缓冲（`.bss`，编译期固定）
+### 4.1 Static buffers (`.bss`, fixed at compile time)
 
-| 项 | 大小 | 位置 |
+| Item | Size | Location |
 |---|---:|---|
-| 音频环形缓冲 `s_rb` | 16 384 B | `mrrc_audio.c` |
-| 瀑布图 RGB565 40 行 | ~18.8 KB | `mrrc_ui.c` |
-| 频谱点数组 `s_pts` | 240 × 4 = 960 B | `mrrc_ui.c` |
-| WS 接收累积缓冲 | 8 KB | `mrrc_net.c` |
+| audio ring `s_rb` | 16 384 B | `mrrc_audio.c` |
+| 40-row RGB565 waterfall | ~18.8 KB | `mrrc_ui.c` |
+| spectrum point array `s_pts` | 240 × 4 = 960 B | `mrrc_ui.c` |
+| WS receive assembly buffer | 8 KB | `mrrc_net.c` |
 
-### 4.2 运行时实测（2026-11-20，多次改动后）
+### 4.2 Measured at runtime (2026-11-20, after several changes)
 
-| 场景 | free | largest | 备注 |
+| Scenario | free | largest | Note |
 |---|---:|---:|---|
-| 启动完成 | 56 KB | 26 KB | 基线 |
-| 静默收听 2 分钟 | 43 KB | 18 KB | |
-| 长时间收听 17 分钟 | 51 KB | 29 KB | 期间发生过重连 |
+| boot complete | 56 KB | 26 KB | baseline |
+| 2 minutes of quiet listening | 43 KB | 18 KB | |
+| 17 minutes of listening | 51 KB | 29 KB | a reconnect happened in between |
 
-### 4.3 `largest` 是唯一要盯的数
+### 4.3 `largest` is the only number that matters
 
-TLS 握手要 **16 KB 连续块**。`free` 有 43 KB 不代表能用——碎片化以后
-`largest` 可能只剩 16 KB，握手就失败，表现为反复 `linkdown` 重连。
+The TLS handshake needs a **16 KB contiguous block**. `free` showing 43 KB does
+not mean it is usable — after fragmentation `largest` may be 16 KB and the
+handshake fails, seen as repeated `linkdown` reconnects.
 
-当前余量很薄：`largest` 18–29 KB，扣掉 16 KB 只剩 2–13 KB。
-**任何新增大于 4 KB 的缓冲之前，先看这一行。**
+The margin is thin: `largest` is 18–29 KB, so 2–13 KB above the handshake.
+**Before adding any buffer larger than 4 KB, look at this line.**
 
-### 4.4 两次让内存变紧的改动（都要知道代价）
+### 4.4 Two changes that tightened memory (know the cost of each)
 
-| 改动 | 花的连续内存 | 换来什么 | 是否值得 |
+| Change | Contiguous memory spent | Bought | Worth it |
 |---|---:|---|---|
-| 音频环 8 → 16 KB | 8 KB | 会话开头突发不再丢帧（253 → 0） | 是 |
-| WS 缓冲 4 → 8 KB | 4 KB | 服务端不再卡 5.8 s | 是 |
+| audio ring 8 → 16 KB | 8 KB | the session-start burst stops dropping frames (253 → 0) | yes |
+| WS buffer 4 → 8 KB | 4 KB | the server no longer stalls for 5.8 s | yes |
 
-两者都是"用内存换掉一次确诊的故障"，不是拍脑袋加保险。
-如果 `largest` 掉到 16 KB 以下，**优先回退 WS 缓冲**（4 KB 那 4 KB 换来的
-是延迟改善，而 16 KB 音频环换掉的是实打实的丢帧）。
+Both traded memory for a diagnosed fault, not for insurance. If `largest` falls
+below 16 KB, **roll back the WS buffer first** (its 4 KB bought a latency
+improvement; the ring's 8 KB bought real dropped frames).
 
-## 5. 软件架构
+## 5. Software architecture
 
 ```
 main/
-  app_main.c     启动顺序、heap 打点、按键任务、每分钟一行统计
-  mrrc_net.c     Wi-Fi、登录、WS 收发、状态解析、PTT 与档位协商
-  mrrc_audio.c   PCM16 环形缓冲 → I2S（无编解码器）
-  mrrc_tx.c      PTT 上行：I2S 采集 → 组帧 → WS 发送，含 1.5 s 心跳
-  mrrc_ui.c      LVGL 界面（40 行瀑布、S 表/功率条、四档旋钮）
+  app_main.c     boot order, heap markers, key task, one statistics line a minute
+  mrrc_net.c     Wi-Fi, login, WS send/receive, state parsing, PTT and tier negotiation
+  mrrc_audio.c   PCM16 ring → I2S (no codec)
+  mrrc_tx.c      PTT uplink: I2S capture → framing → WS send, with a 1.5 s heartbeat
+  mrrc_ui.c      LVGL interface (40-row waterfall, S-meter / power bar, four-position knob)
 components/bsp/  i2c / display / audio / button / battery
 ```
 
-任务划分（单核，优先级就是全部）：
+Task split (one core, so priority is everything):
 
-| 任务 | 优先级 | 栈 | 职责 |
+| Task | Priority | Stack | Job |
 |---|---|---|---|
-| `audio` | 8 | 8 KB | 环形缓冲 → I2S 写，RX 方向的实时性 |
-| `txtask` | 7 | 4 KB | PTT 上行采集与发送，兼 1.5 s 心跳 |
-| `net` | 5 | 6 KB | WS 收发、JSON 解析、状态更新 |
-| `keys` | — | 3 KB | 按键事件队列消费 |
-| LVGL | 2（port 默认） | — | 渲染与 flush |
+| `audio` | 8 | 8 KB | ring → I2S write; the RX path's real-time deadline |
+| `txtask` | 7 | 4 KB | PTT uplink capture and send, plus the 1.5 s heartbeat |
+| `net` | 5 | 6 KB | WS send/receive, JSON parsing, state updates |
+| `keys` | — | 3 KB | consumes the key event queue |
+| LVGL | 2 (port default) | — | rendering and flush |
 
-**心跳和上行在同一个任务里**（`mrrc_tx.c`），优先级 7，高于 `net` 低于 `audio`。
-xz-02 的教训是心跳写进主循环会被编码打满的核饿死；这里的上行没有编码，
-但每 20 ms 一次的 I2S 读 + 一次 WS 写仍然是硬时序，所以它必须能抢占 `net`。
+**Heartbeat and uplink share one task** (`mrrc_tx.c`) at priority 7: above `net`,
+below `audio`. The xz-02 lesson was that a heartbeat written into the main loop
+gets starved by a codec-saturated core; there is no codec here, but a 20 ms I2S
+read plus a WS write is still a hard deadline, so it must preempt `net`.
 
-### 5.1 单核上的真实争用（2026-11-20 实测）
+### 5.1 Real contention on one core (measured 2026-11-20)
 
-卡顿不是玄学，三个数就把话说完了：
+The stutter was not mysterious; three numbers say it:
 
-| 现象 | 数字 | 说明 |
+| Observation | Number | Meaning |
 |---|---|---|
-| 服务端 pump stall | **5791 ms** | `ws.send_bytes()` 阻塞了 5.8 秒，说明对端不读 |
-| 设备实际收帧 | **40.9 /s**（需求 50） | 达成率 82%，每 5.5 帧缺 1 帧 |
-| 设备内存 | `free 59K largest 46K` | 排除 OOM |
+| server pump stall | **5791 ms** | `ws.send_bytes()` blocked for 5.8 s, i.e. the peer was not reading |
+| frames actually received | **40.9 /s** (50 needed) | 82% of nominal, one frame in 5.5 missing |
+| device memory | `free 59K largest 46K` | out-of-memory ruled out |
 
-带宽根本不是瓶颈：音频 31 KB/s + 频谱 9 KB/s = **0.33 Mbps**。
-真正的原因是**一条 TCP 上跑着四种流量**，而发送队列只有 64 帧（§9）。
+Bandwidth was never the constraint: audio 31 KB/s + spectrum 9 KB/s = **0.33
+Mbps**. The cause was **four kinds of traffic on one TCP connection** with a
+64-frame send queue (§9).
 
-三条修正，按实际有效的顺序：
+Three fixes, in the order they actually helped:
 
-1. **WS 接收缓冲 4096 → 8192**。`esp_websocket_client` 缓冲不够时不是丢包，
-   而是**阻塞调用者**，于是服务端那边的 `send_bytes()` 就卡住 —— 这就是 5.8 秒。
-2. **PTT 时频谱降档 `high` → `low`**。此前这个逻辑**根本不存在**，
-   发射时 1701 B 的频谱帧照样排在 642 B 音频帧前面。
-3. **PTT 时设备直接丢弃频谱帧**。服务端只有 `high/mid/low`，没有 `off`，
-   所以"彻底停"只能在设备侧做。
+1. **WS receive buffer 4096 → 8192.** When `esp_websocket_client` runs out of
+   buffer it does not drop packets, it **blocks the caller**, so the server's
+   `send_bytes()` stalls — that was the 5.8 s.
+2. **Drop the spectrum tier `high` → `low` on PTT.** This logic **did not exist
+   at all**; while transmitting, 1701-byte spectrum frames queued ahead of
+   642-byte audio frames.
+3. **Discard spectrum frames on the device while keyed.** The server offers
+   `high/mid/low` with no `off`, so "stop entirely" can only be done device-side.
 
-结果：`err=0 drop=0`，音频帧率回到 49.9/s（理论 50.0）。
+Result: `err=0 drop=0`, audio back to 49.9 frames/s against a 50.0 nominal.
 
-**代价**：WS 缓冲多占 4 KB，`largest` 从 46 KB 降到 16–29 KB。
-PTT 的 TLS 握手要 16 KB 连续堆，余量已经很薄——这是当前最需要盯的数（§4.4）。
+**Cost**: the WS buffer takes 4 KB more, so `largest` fell from 46 KB to 16–29 KB.
+The PTT TLS handshake needs 16 KB contiguous, so the margin is thin — the number
+to watch (§4.4).
 
-## 6. 音频设计
+## 6. Audio design
 
-### 6.1 没有编解码器（2026-11-19 的转折）
+### 6.1 No codec (the turning point of 2026-11-19)
 
-初稿是 Opus（micro-opus 0.4.1）。**已移除**，改为 PCM16 裸传。
+The first design used Opus (micro-opus 0.4.1). **Removed**, replaced by raw PCM16.
 
 | | Opus | PCM16 |
 |---|---|---|
 | flash | +92 KB | — |
 | heap `largest` | 17 KB | 58 KB |
-| 上行带宽 | 12–24 kbps | 256 kbps |
-| 编解码 CPU | 显著 | **零** |
+| uplink bandwidth | 12–24 kbps | 256 kbps |
+| codec CPU | significant | **zero** |
 
-在单核 160 MHz 上，libopus 吃掉的 CPU 和 16 KB 连续堆都付不起。
-代价是带宽涨了 20 倍，但 256 kbps 对 Wi-Fi 不算什么——而且实测证明
-真正的瓶颈从来不是带宽（§5.1）。
+On one 160 MHz core, neither libopus's CPU nor its 16 KB contiguous heap was
+affordable. The cost is 20× the bandwidth, but 256 kbps is nothing to Wi-Fi — and
+measurement showed bandwidth was never the bottleneck (§5.1).
 
-### 6.2 上行帧格式
+### 6.2 Uplink frame format
 
 ```
-[0x01 频道][0x02 标签][320 × int16]  = 642 B / 20 ms
+[0x01 channel][0x02 tag][320 × int16]  = 642 B / 20 ms
 ```
 
-**频道字节不能省**。少了它服务端会把 PCM 当频谱路由，表现为"发射没功率"——
-这个 bug 排查了很久，因为设备侧一切正常，只有对端听不见。
+**The channel byte cannot be omitted.** Without it the server routes the PCM as
+spectrum, which is heard as "transmits with no power" — that bug took a long time
+because the device looked perfectly healthy while the other end heard nothing.
 
-### 6.3 采样率
+### 6.3 Sample rate
 
-**16 kHz，不是选择而是硬件事实**：ES8311 在 48 kHz 采集近乎失聪
-（同样说话，峰值 468 vs 16 kHz 下的 12708）。对 SSB 的 3 kHz 通带够用。
+**16 kHz is a hardware fact, not a preference**: the ES8311 is nearly deaf when
+capturing at 48 kHz (same speech, peak 468 versus 12708 at 16 kHz). That is
+plenty for SSB's 3 kHz passband.
 
-### 6.4 接收缓冲深度
+### 6.4 Receive buffer depth
 
-`AUD_RB_BYTES = 16384`（约 0.51 s）。
+`AUD_RB_BYTES = 16384` (about 0.51 s).
 
-从 8 KB 改过来是因为实测：会话开头 TCP 会一次性灌出积压
-（首段 91.9 帧/秒，理论上限 50），0.26 s 的环根本接不住，
-6 分钟丢 253 帧。16 KB 之后 `drop=0`。
+It came from 8 KB because of a measurement: at session start TCP delivers the
+backlog in one burst (91.9 frames/s observed at the head, against a 50/s
+ceiling), a 0.26 s ring cannot absorb it, and 253 frames were lost in six
+minutes. At 16 KB, `drop=0`.
 
-但要注意：**扩缓冲只解决了突发，没解决持续性丢帧**——后者是 §5.1
-的 TCP 争用，靠降档和丢弃频谱解决。两个问题看似同一个症状，成因不同。
+Note what this does *not* fix: **a bigger buffer absorbs bursts, not sustained
+contention**. The latter is §5.1's TCP sharing, solved by the tier change and by
+discarding spectrum. Two problems, one symptom, different causes.
 
-### 6.5 麦克风增益
+### 6.5 Microphone gain
 
-ES8311 的输入 PGA 是**阶梯的**，不是连续可调：
+The ES8311 input PGA is **stepped**, not continuous:
 
 ```
 0 / 6 / 12 / 18 / 24 / 30 / 36 / 42 dB
 ```
 
-驱动把任何请求映射到这些桶里。**用 1 dB 步进时，18 到 23 dB 写的是同一个寄存器值**，
-听起来完全没变化——这个坑踩了很久。现在旋钮一步 6 dB，显示的数字就是 codec 里的数字。
+The driver maps any request into those buckets. **With a 1 dB step, 18 through
+23 dB write the same register value** and sound identical — that trap cost a long
+time. The knob now steps 6 dB, and the number on screen is the number in the
+codec.
 
-上限 42 dB 是芯片极限，**没有 48 dB**。默认 18 dB。
+The ceiling is 42 dB, the chip's maximum; **there is no 48 dB setting**. Default
+is 18 dB.
 
-## 7. 按键与 PTT
+## 7. Keys and PTT
 
-### 7.1 映射
+### 7.1 Mapping
 
-| 手势 | 动作 |
+| Gesture | Action |
 |---|---|
-| OK 长按 ≥600 ms | **PTT 发射**（松手即停） |
-| OK 双击 | 切换 FREQ / VOL 档 |
-| UP / DOWN 单击 | FREQ 档：±1 kHz；VOL 档：喇叭音量 ±5% |
-| UP / DOWN 长按 | 连发（450 ms 后每 120 ms 一步） |
+| OK held ≥600 ms | **PTT transmit** (stops on release) |
+| OK double-tap | cycle FREQ / VOL |
+| UP / DOWN tap | FREQ: ±1 kHz; VOL: speaker volume ±5% |
+| UP / DOWN held | auto-repeat (after 450 ms, one step every 120 ms) |
 
-长按阈值设为 600 ms（`BSP_BTN_LONG_PRESS_MS` 当前 500，改 600）。理由同 xz-02：**短按绝不能漏出载波**。
+The long-press threshold is 600 ms (`BSP_BTN_LONG_PRESS_MS` was 500; raise it to
+600). Same reason as xz-02: **a short tap must never emit carrier**.
 
-### 7.2 三个必须写进代码的事实
+### 7.2 Three facts that must be in the code
 
-1. **松手事件晚 120 ms**（按键锁的 `BSP_BTN_HOLD_MS`）。PTT 尾部会多发射 120 ms，这是硬件+驱动的固有延迟，不可消除，只能记账。
-2. **触点抖断超过 120 ms 会被判成松手**。长按 PTT 期间如果按键接触不稳，会中途停发。`bsp_button_glitch_count()` 是探针：按住 10 秒，看计数是否持续增长。
-3. **回调在 `esp_timer` 任务里**，只能入队，不能做任何阻塞操作（不能录音、不能碰 UI）。
+1. **The release event is 120 ms late** (`BSP_BTN_HOLD_MS` in the key lock). The
+   tail of every transmission is 120 ms long; it is a hardware-plus-driver delay
+   that cannot be removed, only accounted for.
+2. **A contact break longer than 120 ms is read as a release.** If the key
+   contact is unstable during a long press, the transmission stops mid-way.
+   `bsp_button_glitch_count()` is the probe: hold for 10 s and watch whether the
+   count grows.
+3. **The callback runs in the `esp_timer` task**, so it may only enqueue. It must
+   not block, record, or touch the UI.
 
-### 7.3 PTT 状态机（照抄 xz-02 的安全链）
-
-```
-按下并越过 600 ms → ptt:true → txhb → 等 200 ms → 开始推 Opus 帧
-松手 → 停帧 → "s:" → ptt:false → 200 ms 后回 IDLE
-按住 180 s → 强制 ptt:false + 屏上 TX TIMEOUT
-发射中每 1.5 s → txhb
-```
-
-服务端回 `PTT released` / `FT8 正在发射` / `CQ 进行中` 时同步收键——这三条是服务端的强制收键通知，不能忽略。
-
-## 8. UI 设计
-
-### 8.1 用 LVGL（设计修正：原计划手绘，实测后保留 LVGL）
-
-实测显示 LVGL + 40 行绘制缓冲只占 37 KB，而 Wi-Fi 之后仍有 112 KB 连续块可用，因此 V1 直接用 ai-passport 现成的 LVGL 通路（`bsp_lvgl_init`），不自找手绘的麻烦。
-
-保留 ai-passport 已有的两个处理（都是真机踩出来的，不要重写）：
-
-- 圆形屏用 `LV_EVENT_FLUSH_START` 逐行遮罩，不用 `clip_corner`（后者生成 ARGB layer，会在 24 KB 的 LVGL 池里失败）；
-- `CONFIG_LV_USE_CLIB_MALLOC=y`（走系统堆，避开静态池耗尽后断言）。
-
-手绘条带方案留在文档里当备用：如果 V2 要加频谱+瀑布，内存不够时再拆 LVGL。
-
-### 8.2 版式（240×320 竖屏）
+### 7.3 PTT state machine (xz-02's safety chain, copied)
 
 ```
-y   0.. 28   顶栏：LSB/USB 徽标 | VFO A | 电池 %
-y  40..100   频率："7.215.00"，32 px 抗锯齿
-y 108..130   信息行：S9+10 | FIL 2.4K | AF 128
-y 140..250   S 表：20 段条形 + 峰值保持
-y 260..300   状态片：[FREQ] [RX/TX] [LINK]
+press past 600 ms → ptt:true → txhb → wait 200 ms → start pushing frames
+release → stop frames → "s:" → ptt:false → back to IDLE after 200 ms
+held 180 s → force ptt:false plus "TX TIMEOUT" on screen
+every 1.5 s while transmitting → txhb
 ```
 
-不做频谱、不做瀑布——这是 V1 的范围决定，不是"暂时没做"。
+When the server answers `PTT released` / `FT8 transmitting` / `CQ in progress`,
+unkey to match: those three are the server forcing a release and cannot be
+ignored.
 
-## 9. 网络设计
+## 8. UI design
 
-### 9.1 通道（最终形态：一条连接）
+### 8.1 LVGL (design correction: hand-drawn was the plan, LVGL was kept)
 
-| 通道 | 承载 | 备注 |
+Measurement showed LVGL plus a 40-line draw buffer costs only 37 KB, and after
+Wi-Fi there are still 112 KB of contiguous block available, so V1 uses
+ai-passport's existing LVGL path (`bsp_lvgl_init`) rather than inventing a
+hand-drawn renderer.
+
+Two ai-passport behaviours are kept (both found on real hardware; do not rewrite
+them):
+
+- the round panel is masked row by row on `LV_EVENT_FLUSH_START` rather than with
+  `clip_corner` (the latter builds an ARGB layer and fails inside a 24 KB LVGL
+  pool);
+- `CONFIG_LV_USE_CLIB_MALLOC=y` (use the system heap, avoiding an assert when the
+  static pool runs dry).
+
+The hand-drawn strip plan stays in the document as a fallback: if V2 needs both
+spectrum and waterfall and memory runs out, drop LVGL then.
+
+### 8.2 Layout (240×320 portrait)
+
+```
+y   0.. 28   header: LSB/USB badge | VFO A | battery %
+y  40..100   frequency: "7.215.00", 32 px anti-aliased
+y 108..130   info row: S9+10 | FIL 2.4K | AF 128
+y 140..250   S-meter: 20 segments plus peak hold
+y 260..300   status chips: [FREQ] [RX/TX] [LINK]
+```
+
+No spectrum, no waterfall — that was V1's scope decision, not "not done yet".
+
+## 9. Network design
+
+### 9.1 Channels (final form: one connection)
+
+| Channel | Carries | Note |
 |---|---|---|
-| `/WSterminal` | 控制 JSON + 下行 PCM + 上行 PCM + 频谱 | **唯一一条 TLS** |
+| `/WSterminal` | control JSON + downlink PCM + uplink PCM + spectrum | **the only TLS session** |
 
-**为什么只有一条**：C3 每次 TLS 握手要 16 KB 连续堆，四条根本开不出来
-（`largest` 才 20 多 KB）。代价是四种流量共享一个 TCP 和发送队列——
-这正是 §5.1 那个卡顿的根源，也是为什么现在发射时要主动降档并丢弃频谱。
+**Why only one**: each TLS handshake on the C3 needs 16 KB of contiguous heap and
+four of them simply do not fit (`largest` was around 20 KB). The cost is four
+kinds of traffic sharing one TCP connection and one send queue — the root of
+§5.1's stutter, and the reason the device now drops the tier and discards
+spectrum while transmitting.
 
-帧格式（三者不同，别照抄）：
+Frame formats (all three differ; do not copy one to another):
 
-| 类型 | WebSocket opcode | 帧结构 |
+| Type | WebSocket opcode | Frame |
 |---|---|---|
-| 控制 | `0x01` text | JSON，超过 4 KB 会被分片，需按 `payload_offset` 累积 |
-| 下行音频 | `0x02` binary | `[0x00][0x02][int16 samples]`，20 ms = 642 B，50 帧/秒 |
-| 上行音频 | `0x02` binary | `[0x01][0x02][int16 samples]`，**两层！** |
-| 频谱 | `0x02` binary | `[0x02][0x01] + 850 bins`，1701 B（Full 档），约 5.3 Hz |
+| control | `0x01` text | JSON; anything over 4 KB arrives in fragments and must be assembled by `payload_offset` |
+| downlink audio | `0x02` binary | `[0x00][0x02][int16 samples]`, 20 ms = 642 B, 50 frames/s |
+| uplink audio | `0x02` binary | `[0x01][0x02][int16 samples]`, **two layers!** |
+| spectrum | `0x02` binary | `[0x02][0x01] + 850 bins`, 1701 B (Full tier), about 5.3 Hz |
 
-**上下行帧结构不对称**，照抄会出错：下行 `[0x00]` 后直接是 codec 标签，
-上行却要 `[0x01 频道][0x02 标签]` 两个字节。漏掉频道字节时服务端把 PCM
-当频谱路由，设备侧一切正常、对端完全听不见。
-（旧版写着"上行单层"是错的，已按 2026-11-19 的修复更正。）
+**The two directions are not symmetric**, and copying one from the other breaks:
+downlink carries `[0x00]` followed directly by the codec tag, while uplink needs
+`[0x01 channel][0x02 tag]`. With the channel byte missing the server routes the
+PCM as spectrum: the device looks healthy and the far end hears nothing.
+(The old text saying "uplink is single-layer" was wrong and was corrected with
+the 2026-11-19 fix.)
 
-鉴权一律走 `?token=`：`server.py` 用 `ws.query_params` 校验，**不认 Authorization header**。
+Authentication is always `?token=`: `server.py` checks `ws.query_params` and does
+**not** accept an Authorization header.
 
-### 9.2 V2：单连接多路复用（需改服务端）
+### 9.2 V2: multiplexing on one connection (needs a server change)
 
-如果 §4.3 的实测显示两条 TLS 也放不下，就必须在服务端加一条 `/WSterminal`，把控制、下行音频、上行音频复用到一条连接上。这是自己的服务端，改动可控，但要动 `server.py` 的三个 handler，属于独立任务。
+If §4.3's measurements showed even two TLS sessions do not fit, the server would
+need a `/WSterminal` channel carrying control, downlink, and uplink. It is our own
+server, so the change is controllable but touches three handlers in `server.py` and is a
+separate task.
 
-**V1 的设计不依赖它，V2 才需要。**
+**V1 does not depend on it; V2 does.**
 
-### 9.3 实现踩到的坑（S1–S3）
+### 9.3 Traps hit during implementation (S1–S3)
 
-**① `MBEDTLS_SSL_IN_CONTENT_LEN` 压得太小，WebSocket 一收数据就断**
+**① `MBEDTLS_SSL_IN_CONTENT_LEN` too small, so the WebSocket died on the first read**
 
-第一版为了省内存设成 2048 / 1024，结果 WS 握手成功后立刻报：
+The first version set 2048 / 1024 to save memory and the WS session died right
+after the handshake:
 
 ```
 E esp-tls-mbedtls: read error :-0x7100
@@ -327,42 +396,55 @@ E transport_base: esp_tls_conn_read error, errno=Connection already in progress
 E websocket_client: esp_transport_read() failed with -28928
 ```
 
-原因：服务端第一帧 `fullState` 的 JSON 超过了 TLS 记录缓冲，握手能成（小包），一读业务数据就碎。改成 **6144 / 2048**（与 xz-02 一致）后正常。
-内存代价：TLS 会话从 12 KB 升到约 16 KB，仍无压力。
+The server's first `fullState` frame is larger than the TLS record buffer, so the
+handshake (small packets) succeeded and the first real read broke. Setting
+**6144 / 2048** (matching xz-02) fixed it. Cost: the TLS session went from 12 KB
+to about 16 KB, which was affordable.
 
-**② `/api/auth/login` 限流 5 次 / 5 分钟 / IP**
+**② `/api/auth/login` is rate limited to 5 attempts per 5 minutes per IP**
 
-`server.py:218` 写死 `_LOGIN_MAX_ATTEMPTS = 5`、`_LOGIN_WINDOW_SECONDS = 300`。开发期间反复烧录重启，每次开机都登录，很容易触发 429；固件若用固定短间隔（3 s）重试，会把自己永远锁在窗口里。
+`server.py:218` hard-codes `_LOGIN_MAX_ATTEMPTS = 5` and
+`_LOGIN_WINDOW_SECONDS = 300`. During development the device is reflashed and
+rebooted repeatedly, logging in every boot, which trips 429 quickly; a firmware
+retry at a fixed 3 s interval would lock itself out forever.
 
-固件侧已改为 **指数退避**：30 s → 60 → 120 → 240 → 600（上限）。成功则重置。
+The firmware now backs off exponentially: 30 s → 60 → 120 → 240 → 600 (cap),
+resetting on success.
 
-开发建议：调试期间把服务端限流放宽（如 20 次/5 分钟），或把 token 存 NVS 复用。两条都不做的话，每次改固件验证要等 5 分钟。
+Development advice: relax the server limit while debugging (say 20 per 5 minutes)
+or cache the token in NVS. Without either, every firmware check costs five
+minutes.
 
-**③ ES8311 在 48 kHz 下麦克风近乎失聪（真 bug）**
+**③ The ES8311 microphone is nearly deaf at 48 kHz (a real bug)**
 
-同一段采集代码、同一颗麦克风，只改 codec 采样率：
+Same capture code, same microphone, only the codec rate changed:
 
-| codec 采样率 | PCM 峰值（满量程 32767） |
+| Codec rate | PCM peak (full scale 32767) |
 |---|---|
 | 48 000 Hz | **468** |
 | 16 000 Hz | **12 708** |
 
-差 27 倍。`ref/ai-passport` 的音频 demo 全程只用 16 kHz，48 kHz 采集从未被验证过。
-最终方案：codec 固定 **16 kHz**，接收解码 48 kHz 后 3:1 抽取（三点平均兼作抗混叠），
-发送前 3:1 零阶保持升采样到 48 kHz 交给服务端（服务端自己再重采样到 44.1 kHz）。
+A factor of 27. The `ref/ai-passport` audio demo only ever uses 16 kHz. Final
+arrangement: codec fixed at **16 kHz**; received audio decoded at 48 kHz and
+decimated 3:1 (three-point average also anti-aliasing); transmitted audio
+zero-order-hold upsampled 3:1 to 48 kHz for the server (which resamples to
+44.1 kHz itself).
 
-**④ 一条被推翻的结论（记录以免重犯）**
+**④ One refuted conclusion (recorded so it is not repeated)**
 
-S3 期间我曾从 `frames=34 / 5 s` 推出「TLS 上行只有 ~104 kbit/s，48 kHz PCM 发不出去，
-必须改 Opus 编码」。**这个推论是错的**：同一份日志里 `linkdowns=2`，连接断开期间
-`tx_task` 根本不发帧，因此不能用它计算稳定吞吐。实测（用户听感）48 kHz 裸 PCM 正常，
-带宽够用，Opus 上行方案作废。
+During S3, `frames=34 / 5 s` was read as "TLS uplink gives only ~104 kbit/s, so
+48 kHz PCM cannot work and Opus is mandatory". **That inference was wrong**: the
+same log had `linkdowns=2`, and `tx_task` sends nothing while the link is down, so
+the counter cannot be used for steady-state throughput. Measurement (by ear) said
+48 kHz raw PCM worked and bandwidth was sufficient; the Opus uplink plan was
+scrapped.
 
-教训：用计数器估算吞吐之前，先确认计数器只覆盖了"链路正常"的时段。
+Lesson: before using a counter to estimate throughput, confirm the counter only
+covers time when the link was up.
 
-**⑤ PTT 与 /WSaudioTX 的先后顺序（否则电台 key 了但没调制）**
+**⑤ Ordering between PTT and `/WSaudioTX` (otherwise the radio keys with no modulation)**
 
-`server.py` 在收到 `ptt:true` 时才认领 TX 上行所有权：
+`server.py` claims TX uplink ownership when it receives `ptt:true`:
 
 ```python
 for tx_ws in list(audio_tx_clients):
@@ -370,134 +452,152 @@ for tx_ws in list(audio_tx_clients):
         _tx_owner_ws = tx_ws
 ```
 
-它扫描的是**已经连上的** `audio_tx_clients`。如果先发 `ptt:true` 再连 `/WSaudioTX`，
-扫描时我们的 socket 还不存在，owner 落在别人（网页端）手里，此后我们发的每一帧都被
-当 non-owner 丢弃 —— 表现正是「FT-710 有 TX、完全没有声音」。
+It scans the `audio_tx_clients` that are **already connected**. If `ptt:true` goes
+out first and `/WSaudioTX` connects afterwards, our socket does not exist at scan
+time, ownership lands on someone else (the browser), and every frame we send is
+discarded as non-owner — which is exactly "the FT-710 transmits with no audio".
 
-正确顺序：**先连 `/WSaudioTX` 并等它 accepted，再发 `ptt:true`**。
+Correct order: **connect `/WSaudioTX`, wait for it to be accepted, then send
+`ptt:true`.**
 
-## 10. 里程碑
+## 10. Milestones
 
-| 阶段 | 内容 | 状态 |
+| Stage | Content | State |
 |---|---|---|
-| **S0** | 探针固件：Wi-Fi / TLS / codec / Opus 分阶段打点 | ✅ 154 KB free / 112 KB largest |
-| **S1** | `/WSradio` 控制通道 + LVGL 界面 + 调频键 | ✅ |
-| **S2** | 下行音频（Opus 48k → 3:1 抽取 → 16k → 喇叭） | ✅ `err=0 drop=0` |
-| **S3** | PTT 上行（16k 麦克风 → 48k PCM） | ✅ 已实测通话清晰 |
-| **V2-1** | 单连接 `/WSterminal`（控制+下行+上行） | ✅ largest 18 → 26 KB |
-| **V2-1b** | 三档旋钮 + 频道表 + 三击切模式 | ✅ |
-| **V2-1c** | IPv6 + 公网域名 `w103d.vlsc.net` | ✅ |
-| **V2-2** | 频谱 + 瀑布（`lv_line` / `lv_canvas`） | ✅ |
-| **V2-3** | 省电与休眠 | ⬜ |
+| **S0** | probe firmware: Wi-Fi / TLS / codec / Opus staged markers | ✅ 154 KB free / 112 KB largest |
+| **S1** | `/WSradio` control channel + LVGL UI + tuning keys | ✅ |
+| **S2** | downlink audio (Opus 48k → 3:1 → 16k → speaker) | ✅ `err=0 drop=0` |
+| **S3** | PTT uplink (16k microphone → 48k PCM) | ✅ voice confirmed on air |
+| **V2-1** | single `/WSterminal` connection (control + downlink + uplink) | ✅ largest 18 → 26 KB |
+| **V2-1b** | four-position knob + channel list + triple-tap mode | ✅ |
+| **V2-1c** | IPv6 + public hostname `w103d.vlsc.net` | ✅ |
+| **V2-2** | spectrum + waterfall (`lv_line` / `lv_canvas`) | ✅ |
+| **V2-3** | power management and sleep | ⬜ |
 
-## 11. 验收标准与实测结果
+## 11. Acceptance criteria and measured results
 
-| 标准 | 结果 |
+| Criterion | Result |
 |---|---|
-| PTT 松手后服务端收到 `ptt:false` | ✅ |
-| 连续发射不掉线 | ✅ `frames=212 sendfail=0` |
-| 通话可懂 | ✅ 已实测「可以听清」 |
-| 接收连续无丢帧 | ✅ `err=0 drop=0` |
-| 空闲 `largest ≥ 20 KB` | ✅ 26 KB |
-| 长按 PTT 触点不误判 | ✅ `glitch=0` |
-| 三档 / 三击 / 频道 | ✅ 日志验证 `mode -> VOL`、`chan 5 -> 7210000 LSB` |
-| 连续收听 30 分钟无漂移 | ⬜ 未测 |
+| `ptt:false` reached the server after release | ✅ |
+| continuous transmission without disconnecting | ✅ `frames=212 sendfail=0` |
+| speech intelligible | ✅ confirmed on air |
+| receive without dropped frames | ✅ `err=0 drop=0` |
+| idle `largest ≥ 20 KB` | ✅ 26 KB |
+| long PTT with no false contact break | ✅ `glitch=0` |
+| knob / triple tap / channels | ✅ log shows `mode -> VOL`, `chan 5 -> 7210000 LSB` |
+| 30 minutes of listening without drift | ⬜ not measured |
 
-## 12. 风险清单
+## 12. Risk list
 
-| 风险 | 现状 | 缓解 |
+| Risk | State | Mitigation |
 |---|---|---|
-| **`largest` 只剩 18–29 KB** | **最需关注** | TLS 要 16 KB 连续块。再加大缓冲之前先看 §4.3 |
-| 音频环 16 KB 的延迟代价 | 存在 | 正常不积压；积压时最多多 0.5 s |
-| 多客户端同时收音频 | 存在 | 2–3 个 operator 时服务端分发翻倍，会拖慢本机帧率 |
-| 时钟 0.16% 漂移（C3 无 APLL） | 未验证 | 需 30 分钟会话实测缓冲水位 |
-| ES8311 在 48 kHz 采集失效 | 已规避 | codec 固定 16 kHz |
-| 长按期间触点抖断 | 未发现 | `glitch=0`，持续观察 |
+| **`largest` only 18–29 KB** | **most important** | TLS needs 16 KB contiguous; check §4.3 before adding buffers |
+| latency cost of the 16 KB ring | present | normally no backlog; at worst 0.5 s more |
+| several clients receiving audio | present | with 2–3 operators the server's fan-out doubles and the local frame rate drops |
+| 0.16% clock drift (no APLL) | unverified | needs a 30-minute session watching buffer level |
+| ES8311 capture at 48 kHz | avoided | codec fixed at 16 kHz |
+| contact break during a long press | not seen | `glitch=0`; keep watching |
 
-## 12.1 怎么排查"卡顿"这类问题（2026-11-20 的经验）
+## 12.1 How to debug "stutter" (the lesson of 2026-11-20)
 
-这一轮走过一次弯路，值得记下来，因为症状会骗人。
+This round took one wrong turn worth recording, because the symptom lies.
 
-**症状**：声音卡。**第一反应**：缓冲不够。**结果**：从 8 KB 加到 16 KB，
-前两分钟 `drop=0` 看着好了，17 分钟后帧率反而掉到 34.5/s，比改之前还差。
+**Symptom**: choppy audio. **First reaction**: not enough buffer. **Result**:
+8 KB → 16 KB looked good for two minutes (`drop=0`), then after 17 minutes the
+frame rate fell to 34.5/s, worse than before the change.
 
-**为什么会判断错**：只看了设备侧的 `drop`，没看服务端的 `pump stall`。
-两个数是同一个病的两种表现：
+**Why the diagnosis was wrong**: only the device's `drop` was examined, never the
+server's `pump stall`. They are two views of one illness:
 
-| 数 | 在哪看 | 说明 |
+| Number | Where | Meaning |
 |---|---|---|
-| `pump stall` | 服务端日志 | 服务端写 socket 阻塞多久 → **链路/对端慢** |
-| 收帧率 | 设备日志 | 实际每秒收到几帧 → 需求 50/s |
-| `drop` | 设备日志 | 环缓冲满了丢几帧 → **缓冲太浅** |
-| `largest` | 设备日志 | 连续堆 → 会不会握手失败重连 |
+| `pump stall` | server log | how long the server's socket write blocked → **link or peer is slow** |
+| frame rate | device log | frames actually received per second → 50/s needed |
+| `drop` | device log | frames lost to a full ring → **buffer too shallow** |
+| `largest` | device log | contiguous heap → whether handshakes fail and reconnect |
 
-**判断顺序**（下次直接照这个来）：
+**Order to check in** (use this next time):
 
-1. 先算带宽。**实测 0.33 Mbps 时，带宽就是无罪的**，别再往那儿想。
-2. 看服务端 `pump stall`。几百毫秒以上 = 对端不读，不是网络不够。
-3. 看设备收帧率对不对得上 50/s。对不上但 `drop` 很小 → **是断线重连**，不是丢帧。
-4. 只有 `drop` 大且帧率低，才是缓冲深度问题。
+1. Compute the bandwidth first. **At a measured 0.33 Mbps, bandwidth is innocent**;
+   stop suspecting it.
+2. Look at the server's `pump stall`. Hundreds of milliseconds means the peer is
+   not reading, not that the network is short.
+3. Check whether the device's frame rate matches 50/s. If it does not while `drop`
+   stays small, it is **reconnecting**, not dropping.
+4. Only a large `drop` with a low frame rate means buffer depth.
 
-**这次真正的根因**：一条 TCP 上频谱帧（1701 B）排在音频帧（642 B）前面，
-发射时再叠加 16 KB/s 的上行。三件事挤在一起，表现为"网络卡"。
+**The real root cause here**: on one TCP connection, 1701-byte spectrum frames
+queued ahead of 642-byte audio frames, and transmission added a 16 KB/s uplink on
+top. Three things in one queue, heard as "the network stutters".
 
-**教训**：不要用"加大缓冲"这种对抗症状的手段去代替定位。缓冲只能吸收突发，
-吸收不了持续性的争用。
+**Lesson**: do not substitute "enlarge the buffer" for locating the cause. A
+buffer absorbs bursts; it cannot absorb sustained contention.
 
-## 13. 实机性能画像（-O2 构建，静默收听 60 s 窗口）
+## 13. On-device profile (‑O2 build, 60 s quiet-listening window)
 
-用 `CONFIG_MRRC_PROFILE=y` 采到的数据（该开关默认关闭，运行时间统计每 tick 都要记账）。
+Collected with `CONFIG_MRRC_PROFILE=y` (off by default; run-time statistics charge
+every tick).
 
 ### CPU
 
-| 项 | 数值 |
+| Item | Value |
 |---|---|
-| `opus_decode()` 单帧 | **5.4 ms** |
-| 实际下行帧率 | 2057 帧 / 60 s ≈ **34 帧/秒** |
-| 解码占用实时比例 | **≈ 18.5%**（5.4 ms × 34 / 1000 ms） |
-| IDLE 任务占比 | **37%** ⇒ 系统负载 ≈ 63% |
+| `opus_decode()` per frame | **5.4 ms** |
+| actual downlink rate | 2057 frames / 60 s ≈ **34 frames/s** |
+| share of real time spent decoding | **≈ 18.5%** (5.4 ms × 34 / 1000 ms) |
+| IDLE share | **37%** ⇒ system load ≈ 63% |
 
-结论：解码是最大单项，但仍余约三分之一 CPU。频谱这类附加功能理论上有位置，
-但要先把连接数压下来（多一条 TLS 就多一份加解密开销）。
+Conclusion: decoding was the largest single item but a third of the CPU remained.
+Extra features like the spectrum are theoretically affordable, but the number of
+connections must come down first (each extra TLS session adds encrypt/decrypt
+work).
 
-### 内存
+### Memory
 
-| 指标 | 稳态 | 备注 |
+| Metric | Steady state | Note |
 |---|---|---|
 | free | 31–33 KB | |
-| **largest 连续块** | **9–10 KB** | TLS 握手要 16 KB，靠多块拼接 |
-| **历史最低 min** | **5 KB** | 峰值时刻接近耗尽，是最该盯的数字 |
-| DMA 可用 | 23–24 KB | 健康 |
-| 碎片率 | free/largest ≈ **3.4×** | 偏高 |
+| **largest contiguous block** | **9–10 KB** | TLS needs 16 KB, assembled from several blocks |
+| **historical minimum** | **5 KB** | at the peak it nearly ran out — the number to watch |
+| DMA-capable | 23–24 KB | healthy |
+| fragmentation | free/largest ≈ **3.4×** | high |
 
-碎片来源明确：每条 `fullState` 都是 5.5 KB 的 JSON，由 cJSON 整块 malloc 再整块 free，
-反复切割内部堆。`largest` 只有 9 KB 却仍能完成 TLS 握手，说明 mbedtls 是按多块申请的——
-这也解释了发射时偶发的 `linkdowns`。
+The fragmentation has a known source: every `fullState` is a 5.5 KB JSON document
+allocated and freed whole by cJSON, repeatedly cutting the internal heap. That
+`largest` was only 9 KB yet the handshake still completed means mbedTLS allocates
+in several blocks — which also explains the occasional `linkdowns` while
+transmitting.
 
-**下一步的内存工作应该针对 `largest` 而不是 `free`**：要么把 fullState 解析改成复用缓冲，
-要么给 TLS 预留一段连续堆。
+**Further memory work should target `largest`, not `free`**: either parse
+`fullState` into a reused buffer, or reserve a contiguous heap region for TLS.
 
-### 9.3.6 IPv6：三个开关缺一不可
+### 9.3.6 IPv6: all three switches are required
 
-换公网域名时接口一直报 `0 IPv6 address(es)`，逐层排查才定位：
+When switching to the public hostname the interface kept reporting
+`0 IPv6 address(es)`; it took layer-by-layer checking to find:
 
 ```c
-CONFIG_LWIP_IPV6=y                    // 只是把 IPv6 编进 lwIP
-CONFIG_LWIP_IPV6_AUTOCONFIG=y         // 只是允许接受 RA（SLAAC）
-esp_netif_create_ip6_linklocal(netif) // 必须显式调用，且在 GOT_IP 之后
+CONFIG_LWIP_IPV6=y                    // only compiles IPv6 into lwIP
+CONFIG_LWIP_IPV6_AUTOCONFIG=y         // only allows accepting RA (SLAAC)
+esp_netif_create_ip6_linklocal(netif) // must be called explicitly, after GOT_IP
 ```
 
-`esp_netif_create_default_wifi_sta()` **不会**自动给接口挂 link-local，所以在补上第三个
-之前，前两个开了也没用。补上后：`fe80::` 立即出现，约 6 秒后（第一个 RA）拿到全局
-`2409:...` 地址，`/WSterminal` 随即通过 IPv6 连上 `w103d.vlsc.net`。
-注意打印时 `esp_ip6_addr_t.addr` 是小端字序，直接格式化会是反的。
+`esp_netif_create_default_wifi_sta()` does **not** attach a link-local address, so
+the first two had no effect until the third was added. After that `fe80::` appears
+immediately, a global `2409:...` address follows within about 6 seconds (first
+RA), and `/WSterminal` connects to `w103d.vlsc.net` over IPv6. Note that
+`esp_ip6_addr_t.addr` prints in little-endian word order, so naive formatting
+shows it reversed.
 
-### 9.3.7 按键：双击与三击共用一个键的取舍
+### 9.3.7 Keys: double tap and triple tap share one button
 
-OK 键同时承担 PTT（长按）、三档循环（双击）、模式切换（三击）。双击和三击在同一个
-键上天然冲突：若双击立即执行，检测到第三下时动作已经发生。因此双击动作要等
-**600 ms** 窗口过去（期间键任务以 50 ms 轮询），代价是双击有 0.6 秒延迟感。
+OK carries PTT (hold), the knob cycle (double tap), and mode switching (triple
+tap). Double and triple tap inherently conflict on one key: if the double tap
+acted immediately, the action would already have happened when the third tap
+arrives. So the double-tap action waits out a **600 ms** window (the key task
+polls at 50 ms), which is the 0.6 s delay the operator feels.
 
-另外 `iot_button` 的 `BUTTON_DOUBLE_CLICK` 在这块板上**永远不会触发**：它的判定依赖
-`repeat == 2`，而 BSP 按键锁让抬起事件晚 120 ms，第二次按下落进第一次的按住窗口。
-所以轻点计数是应用层自己做的（见 §9.3.5）。
+Also, `iot_button`'s `BUTTON_DOUBLE_CLICK` **never fires** on this board: it
+requires `repeat == 2`, and the BSP key lock delays the release by 120 ms so the
+second press lands inside the first press's hold window. Click counting is
+therefore done in the application (§9.3.5).
