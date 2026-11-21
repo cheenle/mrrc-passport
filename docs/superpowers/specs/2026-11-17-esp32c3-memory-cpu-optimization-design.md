@@ -1,3 +1,7 @@
+<p align="right">
+  <a href="2026-11-17-esp32c3-memory-cpu-optimization-design.zh_CN.md">简体中文</a> · <strong>English</strong>
+</p>
+
 # ESP32-C3 Memory and CPU Optimization Design
 
 ## Context
