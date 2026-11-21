@@ -12,7 +12,7 @@
 
 ## Unreleased
 
-## Unreleased
+## v1.2.1 - 2026-11-21
 
 - Remove the stutter in both directions. Five independent causes, each measured
   on the board and on the server:
@@ -32,6 +32,18 @@
     was an identity operation with a headroom cost; at 0 dB a full transmission
     adds zero clipped samples.
   See [transport tuning](transport-tuning.md) for the measurements.
+
+- Make the firmware gate work again. `tools/verify_firmware.py` still demanded an
+  image called `FoloToy-AI-Passport.bin` after the project was renamed to
+  `mrrc-terminal`, so every firmware check — and with it every tag release since
+  1.0.0 — failed with `flash_args is missing required images`. The application
+  image is now derived from `flash_args`, and `tools/archive_firmware.py` does the
+  same.
+
+- Every Markdown file now has an English default and a `.zh_CN` peer as the
+  repository rule requires; `./tools/validate.sh --static` exits 0 for the first
+  time, with the host tests reported as skipped because this fork does not vendor
+  the upstream `tests/` tree.
 
 ## v1.2.0 - 2026-11-20
 

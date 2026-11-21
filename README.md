@@ -107,8 +107,8 @@ fetches the artifacts back.
 Device-specific settings (Wi-Fi SSID and password, server host, port, and
 password) live in the gitignored `sdkconfig.defaults.local`, which the root
 `CMakeLists.txt` appends when present. Without that file the build still
-succeeds and simply leaves the Kconfig defaults (empty SSID, port 443). See
-[`sdkconfig.defaults.local`](sdkconfig.defaults.local) for the exact keys;
+succeeds and simply leaves the Kconfig defaults (empty SSID, port 443). The file
+is not in the repository — `sdkconfig.defaults` lists the keys, and
 `idf.py menuconfig` → **MRRC Terminal** edits the same values in `sdkconfig`.
 
 `tools/patch_microopus.sh` is still in the tree but **is no longer needed**:

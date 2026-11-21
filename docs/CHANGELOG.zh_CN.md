@@ -10,7 +10,7 @@
 
 ## Unreleased
 
-## Unreleased
+## v1.2.1 - 2026-11-21
 
 - 消除收发两个方向的卡顿。五个互相独立的原因，每一条都在设备和服务器上实测过：
   - 下行受限于终端的接收队列而不是链路——先被填满的是 `TCP_RECVMBOX_SIZE`（6）、
@@ -25,6 +25,15 @@
   - 发射音频有 5% 样本削波，因为设备模拟 PGA（+30 dB）与服务端软件增益（+12 dB）
     叠加。那级软件增益只是恒等放大却吃掉了余量；设为 0 dB 后整次发射新增削波为 0。
   实测数据见[传输链路调优](transport-tuning.zh_CN.md)。
+
+- 修复固件门禁。项目改名为 `mrrc-terminal` 之后 `tools/verify_firmware.py` 仍要求
+  名为 `FoloToy-AI-Passport.bin` 的镜像，导致每次 firmware check——以及 1.0.0 以来
+  每次 tag 发布——都以 `flash_args is missing required images` 失败。现在应用镜像名
+  从 `flash_args` 推导，`tools/archive_firmware.py` 同步修改。
+
+- 按仓库规则为每个 Markdown 文件补齐英文默认与 `.zh_CN` 对照；`./tools/validate.sh
+  --static` 首次以 exit 0 通过，主机测试报告为 skipped（本 fork 未收录上游的
+  `tests/` 目录）。
 
 ## v1.2.0 - 2026-11-20
 
