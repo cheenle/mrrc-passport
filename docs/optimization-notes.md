@@ -1,20 +1,29 @@
-# 性能优化与排障记录
+<p align="right">
+  <a href="optimization-notes.zh_CN.md">简体中文</a> · <strong>English</strong>
+</p>
 
-本文记录 MRRC Passport（ESP32-C3 终端）在音频链路、UI 渲染、按键处理上的
-实测数据与结论。**目的是回溯**：当某个症状再次出现时，先查这里哪条已经验过、
-哪条是猜测、哪条被推翻过，避免重复走弯路。
+# Performance work and debugging notes
 
-标注约定：
+Measured data and conclusions for the MRRC Passport (ESP32-C3 terminal): audio
+path, UI rendering, key handling. **The point is hindsight** — when a symptom
+comes back, check here first for what was verified, what was a guess, and what
+was refuted, so the same detour is not walked twice.
 
-- **实测** — 有硬件日志或计时数据支撑
-- **推测** — 未被验证，不要当作结论使用
-- **已推翻** — 曾经相信、后来被数据否定的判断
+Labelling:
+
+- **measured** — backed by hardware logs or timings
+- **hypothesis** — unverified; do not treat as a conclusion
+- **refuted** — once believed, later contradicted by data
+
+> Current values live in §13 here and in [transport tuning](transport-tuning.md).
+> Earlier sections are the record as it stood on the day, including numbers that
+> have since moved.
 
 ---
 
-## 0. 基线版本
+## 0. Baseline
 
-`1a99a2f` 是接收完全正常的最后一个提交：
+`1a99a2f` is the last commit where receive worked completely:
 
 ```
 memChannels: 6 slots, 6 usable
@@ -22,100 +31,104 @@ audio profile pcm16 accepted (16000 Hz)
 idle free=78K largest=52K  audio(frames=2512 err=0 drop=0)
 ```
 
-**任何大规模改动出问题时，先回到这里。**
+**When a large change goes wrong, come back here first.**
 
 ---
 
-## 1. 硬件与配置约束
+## 1. Hardware and configuration limits
 
-| 项 | 值 | 影响 |
+| Item | Value | Consequence |
 |---|---|---|
-| SoC | ESP32-C3，单核 160 MHz | 没有第二个核给网络/UI 分担 |
-| PSRAM | 无 | 所有缓冲都吃内部 RAM |
-| 屏幕 | 240×320 ST7789，SPI 80 MHz | 大端，需 `swap_bytes` |
-| Codec | ES8311，16 kHz | 48 kHz 下麦克风几乎无效 |
-| `FREERTOS_HZ` | 1000 | 1 tick = 1 ms（影响所有延时的实际含义） |
-| 堆 | 约 400 KB SRAM，实测 largest 40–60 KB | TLS 需要约 16 KB **连续**空间 |
+| SoC | ESP32-C3, single core at 160 MHz | no second core to carry the network or the UI |
+| PSRAM | none | every buffer comes out of internal RAM |
+| Display | 240×320 ST7789, SPI 80 MHz | big-endian panel; needs `swap_bytes` |
+| Codec | ES8311, 16 kHz | the microphone path is effectively dead at 48 kHz |
+| `FREERTOS_HZ` | 1000 | 1 tick = 1 ms (this sets what every delay actually means) |
+| Heap | ~400 KB SRAM, measured `largest` 40–60 KB | TLS needs ~16 KB **contiguous** |
 
-### 字模与内存
+### Fonts and memory
 
-每套 Montserrat 字模是几 KB 的点阵位图，**在 flash 里，不在堆上**。
-当前只编 3 套（实测：12 / 20 / 44）。曾一度编 6 套（12/14/16/20/28/40），
-`bin` 大 37 KB —— 省的是 flash，**不影响 `largest`**。
-（已推翻：曾误以为减字模能提升堆余量。）
+Each Montserrat face is a few KB of glyph bitmaps **in flash, not on the heap**.
+Three faces were compiled at the time (12 / 20 / 44); there was once a six-face
+build (12/14/16/20/28/40) whose `bin` was 37 KB larger — that is flash, and it
+**does not change `largest`**. (Refuted: the belief that dropping font faces
+would improve heap headroom.)
 
 ---
 
-## 2. 音频链路（PCM16，无 Opus）
+## 2. Audio path (PCM16, no Opus)
 
-### 2.1 为什么去掉 libopus（实测）
+### 2.1 Why libopus went away (measured)
 
-去掉后 `bin` 从 `0x186ce0` 降到 `0x16f4b0`（约 92 KB），
-堆 `free 44K → 80K`、`largest 17K → 58K`。
-C3 没有余量跑 Opus + TLS + LVGL。
+Removing it took `bin` from `0x186ce0` to `0x16f4b0` (about 92 KB) and moved the
+heap from `free 44K / largest 17K` to `free 80K / largest 58K`. The C3 has no
+headroom for Opus plus TLS plus LVGL.
 
-### 2.2 上行帧格式（关键，坑过一次）
+### 2.2 Uplink frame format (important, cost us once)
 
-`/WSterminal` 的每个二进制帧都带**频道字节**：
+Every binary frame on `/WSterminal` carries a **channel byte**:
 
 ```
 [0x01][0x02][int16 PCM ...]
  ^chan  ^codec tag
 ```
 
-- `0x01` = TX 音频（上行）
-- `0x00` = RX 音频（下行）
-- `0x02` = 频谱
+- `0x01` = TX audio (uplink)
+- `0x00` = RX audio (downlink)
+- `0x02` = spectrum
 
-**曾经的 bug**：固件直接发 `[0x02][PCM]`，服务端把 `0x02` 当**频谱通道**，
-PCM 被丢弃 —— 表现是「发射没功率、没声音」。补上频道字节后立刻正常。
+**The bug**: the firmware sent `[0x02][PCM]` directly, the server read `0x02` as
+the **spectrum channel** and discarded the PCM — heard as "transmits with no power
+and no audio". Adding the channel byte fixed it immediately.
 
-### 2.3 PCM16 档位协商
+### 2.3 PCM16 profile negotiation
 
-连上后发：
+On connect it sends:
 
 ```json
 {"type":"audioCaps","profile":"pcm16"}
 ```
 
-服务端回 `accepted:true` + `rate:16000`。字段名是 **`profile`**，不是 `rx`。
+The server answers `accepted:true` plus `rate:16000`. The field is **`profile`**,
+not `rx`.
 
-**注意**：`/WSterminal` 端点必须支持 `audioCaps`；早期版本只认
-`spectrumCaps`，声明被静默忽略（表现：永远收不到回应）。
+**Note**: the `/WSterminal` endpoint must support `audioCaps`; an early version
+only honoured `spectrumCaps` and silently ignored the request (symptom: the reply
+never arrives).
 
-### 2.4 下行丢帧的三个位置
+### 2.4 The three places downlink frames are lost
 
-`mrrc_audio.c` 的 `rb_put()`：
+`rb_put()` in `mrrc_audio.c`:
 
-| 位置 | 含义 | 排查 |
+| Site | Meaning | How to see it |
 |---|---|---|
-| `lock` | 拿不到互斥锁（网络回调与音频任务争用） | `audio drops: lock=N` |
-| `full` | 环形缓冲满 | `audio drops: full=N` |
+| `lock` | the mutex could not be taken (network callback against audio task) | `audio drops: lock=N` |
+| `full` | the ring buffer is full | `audio drops: full=N` |
 
-日志每分钟打印一次：
+Logged once a minute:
 
 ```
 audio drops: lock=0 full=26
 ```
 
-**实测结论**：绝大多数丢帧是 `full`，不是 `lock`。
+**Measured conclusion**: nearly all drops were `full`, not `lock`.
 
-### 2.5 已试过、不要重复的方案
+### 2.5 Tried and not worth repeating
 
-| 方案 | 结果 |
+| Attempt | Result |
 |---|---|
-| 缓冲 8 KB → 16 KB | **无用**。`full` 照样涨，丢帧率不变 → 不是容量问题 |
-| `rb_put` 加 spin + yield | **有害**。丢帧反而上升（11% → 13%） |
-| 批量取帧（`rb_get` 一次取多帧） | 出现过一次 10%→2.3% 的改善，但与其他改动混在一起，未单独验证 |
+| 8 KB → 16 KB ring | **useless**. `full` kept growing and the drop rate did not move — not a capacity problem |
+| spin + yield around `rb_put` | **harmful**. Drops went up (11% → 13%) |
+| batched frame reads in `rb_get` | one run showed 10% → 2.3%, but it was mixed with other changes and never verified alone |
 
 ---
 
-## 3. UI 与 LVGL（CPU 的主要消耗方）
+## 3. UI and LVGL (the main CPU consumer)
 
-### 3.1 实测 CPU 分布（典型）
+### 3.1 Typical measured CPU split
 
 ```
-taskLVGL       35-44%     ← 最大消耗方
+taskLVGL       35-44%     <- the largest consumer
 IDLE           40-54%
 esp_timer       2-3%
 websocket       1-4%
@@ -123,185 +136,200 @@ wifi            1-2%
 audio          <1%
 ```
 
-`refresh()`（我们自己的 UI 代码）只占 **3-9%**，其余全在 LVGL 内部。
+`refresh()` — our own UI code — is only **3-9%**; the rest is inside LVGL.
 
-### 3.2 已排除的原因（实测）
+### 3.2 Ruled out (measured)
 
-做了三次对照实验，**分别禁用重绘**后测量 `taskLVGL`：
+Three control experiments, each disabling one redraw and reading `taskLVGL`:
 
-| 实验 | taskLVGL |
+| Experiment | taskLVGL |
 |---|---|
-| 禁用瀑布重绘 | 49% |
-| 禁用频谱重绘 | 43% |
-| 两者都禁用 | 45% |
+| waterfall redraw disabled | 49% |
+| spectrum redraw disabled | 43% |
+| both disabled | 45% |
 
-**结论：CPU 消耗与「画什么」基本无关**，是 LVGL 每次运行的固定开销。
-因此「减少绘制内容」这条路走不通。
+**Conclusion: CPU cost is essentially independent of what is drawn**; it is LVGL's
+fixed per-run overhead. "Draw less" is therefore a dead end.
 
-（诊断开关 `CONFIG_MRRC_UI_NO_WF` / `MRRC_UI_NO_PLOT` 曾临时加入，现已移除。）
+(The diagnostic switches `CONFIG_MRRC_UI_NO_WF` / `MRRC_UI_NO_PLOT` existed
+temporarily and are gone.)
 
-### 3.3 已排除的原因（推测后被推翻）
+### 3.3 Ruled out after being believed
 
-- **「`lv_timer_handler()` 每秒 1000 次」— 已推翻。**
-  读到 `esp_lvgl_port` 里有 `vTaskDelay(1)`，以为循环固定 1 ms 一轮。
-  实际上循环开头的 `xEventGroupWaitBits(..., task_delay_ms)` **已经按 LVGL
-  的要求睡过了**，那个 `vTaskDelay(1)` 只是额外多睡 1 ms。
-  真实频率约 **20 次/秒**，不是 1000。
+- **"`lv_timer_handler()` runs 1000 times a second" — refuted.** There is a
+  `vTaskDelay(1)` inside `esp_lvgl_port`, which looked like a 1 ms loop. The loop
+  already sleeps through `xEventGroupWaitBits(..., task_delay_ms)` as LVGL
+  requires; the `vTaskDelay(1)` only adds one more millisecond. The real rate is
+  about **20 per second**, not 1000.
+- **"Trace and waterfall adjacency merges dirty areas" — partly true, not the
+  main cause.** Moving `Y_WF` from 192 to 196 (5 rows of black gap) took
+  `taskLVGL` from 44% to 35%: eight points, not decisive.
 
-- **「频谱与瀑布相邻导致脏区合并」— 部分成立但非主因。**
-  把 `Y_WF` 从 192 改到 196（留 5 行黑隙）后，`taskLVGL` 44% → 35%，
-  但这是 8 个百分点的变化，不是决定性因素。
+### 3.4 Draw buffer lines — the single biggest win
 
-### 3.4 绘制缓冲行数 —— 收益最大的一处
-
-**Espressif 官方性能指南给了明确阈值**（`esp_lvgl_port/docs/performance.md`）：
+**Espressif's performance guide states the threshold**
+(`esp_lvgl_port/docs/performance.md`):
 
 > - Frame buffer size >25% of the screen does not bring relevant performance boost
 > - Frame buffer size <10% will have **severe negative effect** on performance
 
-240×320 = 76800 px 换算：10% = 7680 px = **32 行**。
+240×320 = 76800 px, so 10% = 7680 px = **32 lines**.
 
-我们长期跑在 3.8%–5.6%，正好落在官方说的"严重影响"区间 ——
-**这就是 taskLVGL 吃掉一半 CPU 的真正原因。**
+We had been running at 3.8%–5.6%, exactly in the range the guide calls severe —
+**that was the real reason `taskLVGL` ate half the CPU.**
 
-| 缓冲行数 | 占屏比 | taskLVGL | largest |
+| Lines | Share of screen | taskLVGL | largest |
 |---|---|---|---|
-| 8 行 | 3.8% | 58-60% | 46K |
-| 12 行 | 5.6% | 43-49% | 44K |
-| 32 行 + FAST_MEM_IRAM | 10.0% | 20-26% | 18K ← 余量不足 |
-| **24 行 + FAST_MEM_IRAM（当前）** | **7.5%** | **23%** | **24K** |
+| 8 | 3.8% | 58-60% | 46K |
+| 12 | 5.6% | 43-49% | 44K |
+| 32 + FAST_MEM_IRAM | 10.0% | 20-26% | 18K ← not enough headroom |
+| **24 + FAST_MEM_IRAM (current)** | **7.5%** | **23%** | **24K** |
 
-最终停在 24 行：32 行的 CPU 略好，但 `largest` 只剩 18 KB，距 PTT 的 TLS
-需要的 ~16 KB 只有 2 KB 余量 —— 在一颗同时跑 Wi-Fi、音频和渲染器的芯片上
-不够安全。用 3 个百分点 CPU 换回 6 KB 连续内存。
+It settled at 24 lines: 32 is slightly better for CPU but leaves `largest` at
+18 KB, only 2 KB above the ~16 KB PTT's TLS handshake needs — not safe on a chip
+also running Wi-Fi, audio, and a renderer. Three CPU points bought back 6 KB of
+contiguous memory.
 
-配套启用 `CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y`（官方单列的加速项：
-把最热的 LVGL 函数放进 IRAM，免去 flash cache 等待）。
+This was paired with `CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y` (Espressif's
+separate acceleration item: the hottest LVGL functions go to IRAM and skip the
+flash-cache wait).
 
-⚠️ **代价要盯紧**：`largest` 从 38K 降到 24K，启动期最低水位 `min=9K`。
-PTT 的 TLS 握手需要约 16 KB 连续空间 —— 24K 够用但余量不大。
-如果发射失败，先把缓冲退到 24 行（7.5%）。
+⚠️ **Watch the cost**: `largest` fell from 38K to 24K and the boot-time minimum
+reached `min=9K`. The PTT TLS handshake needs ~16 KB contiguous — 24K works but
+without much margin. If transmission fails, step the buffer back first.
 
-### 3.4b 已排除的配置项
+### 3.4b Configuration items already ruled out
 
-| 项 | 结论 |
+| Item | Conclusion |
 |---|---|
-| 12 种像素格式全开 | **已处理**：只留 RGB565，bin 小 114 KB。CPU 无变化（不在热路径） |
-| `LV_DRAW_SW_ASM_NONE` | **无法改**：四选一，替代项需 NEON / Helium / RISC-V **Vector**。ESP32-C3 是 RV32IMC，没有 V 扩展 |
-| `swap_bytes = true` | **已改为关闭**：面板侧用 RAMCTRL(0xB0) 配小端。实测 CPU 无变化 —— `lv_draw_sw_rgb565_swap` 本就不是瓶颈，省掉的只是每帧 2 万次遍历 |
-| `LV_USE_FLEX` / `GRID` | **不能关**：`lv_list`、`lv_menu`、`lv_calendar` 甚至 LVGL 自带示例都依赖 |
-| `double_buffer` | **开不了**：两倍缓冲 = 30 KB 连续内存，与 PTT 的 TLS 抢空间 |
-| CPU 240 MHz | 不适用：C3 最高 160 MHz |
+| all 12 pixel formats enabled | **done**: RGB565 only, `bin` 114 KB smaller. No CPU change (not on the hot path) |
+| `LV_DRAW_SW_ASM_NONE` | **cannot change**: it is a four-way choice whose alternatives need NEON / Helium / RISC-V **Vector**. The ESP32-C3 is RV32IMC, no V extension |
+| `swap_bytes = true` | **turned off**: the panel is told little-endian via RAMCTRL(0xB0). No CPU change — `lv_draw_sw_rgb565_swap` was never the bottleneck; it only saved 20k iterations per frame |
+| `LV_USE_FLEX` / `GRID` | **cannot disable**: `lv_list`, `lv_menu`, `lv_calendar` and even bundled LVGL examples depend on them |
+| `double_buffer` | **cannot enable**: doubling the buffer is 30 KB contiguous, competing with PTT's TLS |
+| CPU at 240 MHz | not applicable: the C3 tops out at 160 MHz |
 
-### 3.5 改动绘制缓冲行数要小心
+### 3.5 Changing draw buffer lines needs care
 
-`BSP_LVGL_DRAW_BUFFER_LINES` 从 8 提到 20（9.4 KB）能减少 SPI 事务次数，
-但它占的是**连续内部 RAM**。曾与其他内存改动叠加，导致 `largest` 掉到 9 KB，
-PTT 的 TLS 握手失败 —— 表现是「发射自己断」。
+`BSP_LVGL_DRAW_BUFFER_LINES` from 8 to 20 (9.4 KB) reduces SPI transactions, but
+it is **contiguous internal RAM**. Once combined with other memory changes it
+pushed `largest` to 9 KB and the PTT TLS handshake failed — heard as
+"transmission drops itself".
 
-**一次只改一项，改完测内存。**
+**Change one thing at a time and measure memory after each.**
 
-### 3.6 UI 刷新率
+### 3.6 UI refresh rate
 
-刷新率最终停在 **190 ms（5.26 Hz）**，与电台扫描率对齐。
+The refresh period settled at **190 ms (5.26 Hz)**, matched to the radio's sweep
+rate.
 
-历史：200 ms → 100 ms 曾让 CPU 翻倍而回退；随后为了省 CPU 降到 300 ms（3.3 Hz）。
-但 300 ms 有一个隐藏代价：数据源是 5.3 帧/秒，而 tick 只有 3.3 次/秒，
-`s_bins_new` 又是个 bool —— 每个 tick 之间到达的 1.6 帧里只有最后一帧被保留，
-**约 38% 的扫描帧被静默丢弃**。瀑布为了掩盖这个错配，每个 tick 用
-`s_prev`/`s_cur` 插值补出两行，所以历史里大部分行是算法编出来的。
+History: 200 ms → 100 ms doubled the CPU and was reverted; later it was dropped
+to 300 ms (3.3 Hz) to save CPU. But 300 ms had a hidden cost: the data source
+delivers 5.3 frames/s while the tick runs 3.3 times/s, and `s_bins_new` is a
+single bool, so of the ~1.6 frames arriving between ticks only the last survived
+— **about 38% of sweep frames were silently discarded**. To hide the mismatch the
+waterfall interpolated two rows per tick from `s_prev`/`s_cur`, so most rows in
+the history were synthesised.
 
-| tick | 频率 | 数据吻合 | 瀑布内容 | taskLVGL |
+| Tick | Rate | Data match | Waterfall content | taskLVGL |
 |---|---|---|---|---|
-| 300 ms | 3.3 Hz | 丢 38% | 插值补 2 行 | 23% |
-| **190 ms** | **5.26 Hz** | **零丢失** | **每行都是实测** | **33%** |
+| 300 ms | 3.3 Hz | 38% lost | 2 interpolated rows | 23% |
+| **190 ms** | **5.26 Hz** | **nothing lost** | **every row measured** | **33%** |
 
-190 ms 的代价是 CPU 从 23% 升到 33%、`audio drops` 开始增长，
-但实测听感无断续（`err=0`），换来的是真正跟手的曲线和诚实的瀑布历史。
-`update_plot`/`wf_push` 也改成只在 `got_sweep` 时执行，不再用旧数据重复重绘。
+The cost of 190 ms is CPU going 23% → 33% and `audio drops` starting to grow, but
+listening showed no break-up (`err=0`), and it buys a trace that follows the knob
+and an honest waterfall history. `update_plot`/`wf_push` now run only on
+`got_sweep`, so old data is no longer repainted.
 
-频谱档位 `spectrumCaps`：
+Spectrum tiers (`spectrumCaps`):
 
-| 档位 | 帧大小 | divider | 帧率 |
+| Tier | Frame size | Divider | Frame rate |
 |---|---|---|---|
-| `high`（Full） | 1701 B | 1 | ~5.3 帧/秒 |
-| `mid` | 851 B | 2 | ~2.7 帧/秒 |
-| `low` | 426 B | 4 | ~1.3 帧/秒 |
+| `high` (Full) | 1701 B | 1 | ~5.3 frames/s |
+| `mid` | 851 B | 2 | ~2.7 frames/s |
+| `low` | 426 B | 4 | ~1.3 frames/s |
 
-接收用 `high`，发射时降到 `low`（发射时屏幕没人看，省带宽给音频上行）。
+Receive uses `high` and switches to `low` while transmitting (nobody watches the
+screen then, and the bandwidth goes to the audio uplink).
 
-**坑**：早期固件写死 `mid`，瀑布看起来像爬 —— 每帧就是一行历史，
-半速就是半行速。
+**Trap**: early firmware hard-coded `mid` and the waterfall looked like it was
+crawling — each frame is one row of history, so half the rate is half the row
+rate.
 
 ---
 
-## 4. 按键（PTT 与双击）
+## 4. Keys (PTT and double-click)
 
-### 4.1 ADC 按键的真实时序（实测）
+### 4.1 Real ADC key timing (measured)
 
-| 操作 | 驱动报告的按压时长 |
+| Action | Hold time reported by the driver |
 |---|---|
-| 正常单击 | 169–246 ms |
-| 真长按（PTT） | 569–580 ms |
-| **快双击（被驱动合并）** | **619–627 ms** |
+| normal single tap | 169–246 ms |
+| genuine long press (PTT) | 569–580 ms |
+| **fast double tap (merged by the driver)** | **619–627 ms** |
 
-驱动把快双击的两下**合并成一次按压**，报成长按 —— 与真 PTT 只差 40 ms，
-**无法按时长区分**。这是「双击误触发 PTT」的根源。
+The driver **merges the two taps of a fast double-click into one press** and
+reports it as a long press — 40 ms away from a genuine PTT, **indistinguishable
+by duration**. That is the root of "a double-click keys the transmitter".
 
-### 4.2 已尝试的判别方案
+### 4.2 Discrimination schemes that were tried
 
-| 方案 | 结果 |
+| Scheme | Result |
 |---|---|
-| 检查「上一击的窗口是否开着」 | 不可靠：窗口由抬手设置，第二下按下时可能还没设 |
-| 按按压时长判断 | 不可靠：见上表，619 vs 569 |
-| 要求按键静默 900 ms 才允许 PTT | 有效但体验差（双击后想立刻说话要等） |
-| 上行队列 + 单写者 | **引入过新问题，已全部回滚** |
+| check whether the previous tap's window is still open | unreliable: the window is set on release and may not be set yet when the second tap lands |
+| decide by hold duration | unreliable: see the table, 619 vs 569 |
+| require 900 ms of silence before PTT | works, but feels bad (after a double tap you must wait to talk) |
+| uplink queue with a single writer | **introduced new problems, fully rolled back** |
 
-### 4.3 按键事件只能用 PRESS
+### 4.3 Key events must use PRESS
 
-`iot_button` 只在按住超过 `short_press_time`（180 ms）才发 `CLICK`，
-更短的**静默丢弃**。这块板的 ADC 解码 + BSP 按键锁让快按落进这个洞，
-表现是「按了不起作用」。
+`iot_button` emits `CLICK` only when the hold exceeds `short_press_time`
+(180 ms); anything shorter is **silently dropped**. This board's ADC decoding
+plus the BSP key lock put fast taps into that hole, which looked like "the button
+does nothing".
 
-**UP/DOWN 必须用 `BSP_BTN_PRESS`**（按下即发，无条件、零延迟），
-不要用 `CLICK`。
+**UP/DOWN must use `BSP_BTN_PRESS`** (fires on press, unconditional, no delay),
+not `CLICK`.
 
-### 4.4 按键轮询周期
+### 4.4 Key polling period
 
-`CONFIG_BUTTON_PERIOD_TIME_MS = 5` —— `iot_button` 每 5 ms 轮询一次，
-每秒 200 次。实测 `esp_timer` 任务占 2–3%，不是 CPU 大头，但它是持续唤醒源。
-改为 10 ms 可减半，注意 `SHORT_TICKS`/`LONG_TICKS` 按这个值计算，改后要验按键判定。
-
----
-
-## 5. 显示与字体
-
-### 5.1 `transform_scale` 在这块屏上不可靠
-
-用 `lv_obj_set_style_transform_scale(s_freq, 384, 0)` 把 28 px 字放大 1.5×，
-结果是：
-
-- 字形渲染 42 px，但对象只有 28 px → 被裁成**上半截**
-- 把对象改高 → **完全黑屏**（与圆角遮罩回调冲突）
-
-**改用原生 44 px 字模**，稳定清晰。缩放这条路不要再走。
-
-### 5.2 圆角屏幕
-
-面板有圆角，y=0 的字形会被裁。顶栏文字放在 `H_HDR` 内的 y=8 左右。
-
-### 5.3 字号与底板宽度
-
-一行四块底板必须算清总宽。`FIL 2.4K` 在 14 px 下要 ~62 px，
-曾因底板给 56 px 而**折行并与下方 S 表重叠**。改 12 px 后 `FL 2.4K` 约 55 px，刚好。
+`CONFIG_BUTTON_PERIOD_TIME_MS = 5` — `iot_button` polls every 5 ms, 200 times a
+second. Measured `esp_timer` at 2–3% CPU: not the main cost, but a constant wake
+source. Halving it to 10 ms is possible; note that `SHORT_TICKS`/`LONG_TICKS` are
+computed from this value, so key decisions must be re-verified after the change.
 
 ---
 
-## 6. 服务端交互的坑
+## 5. Display and fonts
 
-### 6.1 断线的真实原因
+### 5.1 `transform_scale` is unreliable on this panel
 
-服务器日志（`/opt/mrrc_modern/logs/server-stdout.log`）里：
+`lv_obj_set_style_transform_scale(s_freq, 384, 0)` to scale a 28 px face by 1.5×:
+
+- the glyph rendered at 42 px into a 28 px object → clipped to the **top half**
+- making the object taller → **completely black screen** (conflicts with the
+  rounded-mask callback)
+
+**Use a native 44 px face**; it is stable and crisp. Do not revisit scaling.
+
+### 5.2 Rounded panel
+
+The panel corners are round, so glyphs at y=0 get clipped. Header text sits around
+y=8 inside `H_HDR`.
+
+### 5.3 Font size and plate width
+
+Four plates in one row must be budgeted. `FIL 2.4K` needs ~62 px at 14 px; with
+56 px plates it **wrapped and overlapped the S-meter below**. At 12 px,
+`FL 2.4K` is about 55 px and fits.
+
+---
+
+## 6. Traps in the server interaction
+
+### 6.1 What a disconnect really means
+
+In the server log (`/opt/mrrc_modern/logs/server-stdout.log`):
 
 ```
 TX audio ownership → PTT client
@@ -309,70 +337,79 @@ Terminal client disconnected during TX! Forcing RX.
 Terminal client connected (2 total, ...)
 ```
 
-**是设备端的 WebSocket 断了，服务器只是按规矩强制回 RX**，不是服务器踢的。
-排查方向应该是固件侧（CPU 饿死网络任务），不是服务端的 PTT watchdog。
+**The device's WebSocket dropped; the server merely forced RX as its rule
+requires.** It was not the server kicking us. Look at the firmware side (a starved
+network task), not the server's PTT watchdog.
 
-### 6.2 找对服务器
+### 6.2 Use the right server
 
-- **正确**：W103D 盒子 `w103d.vlsc.net`，服务在 `/opt/mrrc_modern`，日志同上
-- **错误**：本机 `~/HAM/mrrc/`（旧的 ALS-7400l 那套，日志里会出现
-  `rigctld 未就绪` —— 与被测设备毫无关系）
+- **right**: the W103D box `w103d.vlsc.net`, service under `/opt/mrrc_modern`,
+  log as above
+- **wrong**: the local `~/HAM/mrrc/` (the old ALS-7400l stack, whose log says
+  `rigctld not ready` — unrelated to the device under test)
 
-### 6.3 发送失败的错误码
+### 6.3 Send failure codes
 
-`esp_websocket_client_send_bin()` 的返回值：
+Return values of `esp_websocket_client_send_bin()`:
 
-| 值 | 含义 |
+| Value | Meaning |
 |---|---|
-| `>0` | 实际写入字节数 |
-| `0` | 未写入（socket 忙） |
-| `-1` | 拿不到客户端锁（**跨任务争用**） |
-| `-2` | socket 未连接 |
+| `>0` | bytes actually written |
+| `0` | nothing written (socket busy) |
+| `-1` | could not take the client lock (**cross-task contention**) |
+| `-2` | socket not connected |
 
-`-1` 说明多个任务在同时写同一个 WebSocket。曾为此引入上行队列，
-结果**更糟**（队列满、内存碎片、状态机错乱），**已全部回滚**。
-
----
-
-## 7. 方法论（踩过的坑）
-
-这一节比上面的数据更重要。
-
-1. **一次只改一项。** 曾同时改「绘制缓冲 + 音频环形 + 锁策略」，结果三项互相
-   影响，无法归因，最后全部回滚。
-
-2. **先测量，再改。** 多次凭直觉加大缓冲、加队列、改锁，全部失败。
-   而加了 `audio drops: lock=/full=` 计数后，一眼就看出是 `full` 不是 `lock`。
-
-3. **警惕「省内存」的直觉。** 字模在 flash 不在堆；去掉背景色不省内存
-   （样式字段而已）；而 `largest` 是**连续**空间，减大的 `.bss` 才有效。
-
-4. **构建失败要拦住。** `&&` 链中如果 grep 到错误但返回 0，会把旧固件刷进去。
-   刷机前确认 `Project build complete` 真的出现。
-
-5. **设备掉线不一定是代码问题。** 那次「插上了」但 `/dev/cu.usbmodem*` 消失，
-   是 USB 枚举问题，重插即可。
-
-6. **不要改 `managed_components/`。** 它会被重新拉取。需要打补丁就写
-   `tools/patch_*.sh`，构建前跑，幂等。
+`-1` means several tasks are writing the same WebSocket. An uplink queue was
+introduced for this once and made things **worse** (full queue, fragmentation,
+confused state machine) — **fully rolled back**.
 
 ---
 
-## 8. 当前已知良好配置
+## 7. Method (the traps worth remembering)
 
-| 项 | 值 |
+This section matters more than the numbers above.
+
+1. **Change one thing at a time.** Once the draw buffer, the audio ring, and the
+   locking strategy changed together; they interacted, nothing could be
+   attributed, and all three were rolled back.
+
+2. **Measure before changing.** Enlarging buffers, adding queues and rewriting
+   locks on intuition all failed. Adding `audio drops: lock=/full=` counters
+   showed in one glance that it was `full`, not `lock`.
+
+3. **Distrust "saves memory" intuition.** Fonts live in flash, not the heap;
+   removing a background colour saves nothing (it is only a style field); and
+   `largest` is about **contiguous** space, so only shrinking a large `.bss`
+   helps.
+
+4. **A failed build must stop the chain.** In an `&&` chain, if `grep` finds an
+   error but returns 0, the previous firmware gets flashed. Confirm
+   `Project build complete` actually appeared before flashing.
+
+5. **A vanished device is not always a code problem.** When `/dev/cu.usbmodem*`
+   disappeared after "plugging it in", it was USB enumeration; replugging fixed
+   it.
+
+6. **Never edit `managed_components/`.** It is re-fetched. Write a
+   `tools/patch_*.sh`, run it before the build, keep it idempotent.
+
+---
+
+## 8. Configuration that was known good at the time
+
+| Item | Value |
 |---|---|
 | `REFRESH_MS` | 300 (3.3 Hz) |
-| `WF_H` | 40 行（18.8 KB） |
+| `WF_H` | 40 rows (18.8 KB) |
 | `PLOT_H` | 45 px |
-| `Y_WF` | 196（与频谱留 5 行黑隙） |
+| `Y_WF` | 196 (5 rows of black gap below the trace) |
 | `AUD_RB_BYTES` | 8192 (~250 ms) |
 | `BSP_LVGL_DRAW_BUFFER_LINES` | 8 |
-| 字模 | 12 / 20 / 44 |
-| 频谱档位 | 接收 `high`，发射 `low` |
-| TX 帧长 | 20 ms @ 16 kHz（320 样本） |
+| Fonts | 12 / 20 / 44 |
+| Spectrum tier | `high` receiving, `low` transmitting |
+| TX frame | 20 ms at 16 kHz (320 samples) |
 
-实测：
+Measured:
 
 ```
 free=67K  largest=44K  min=43K
@@ -382,182 +419,194 @@ audio drops: lock=0 full=5    (0.46%)
 
 ---
 
-## 9. 下一步候选（按风险从低到高）
+## 9. Next candidates (lowest risk first)
 
-1. `CONFIG_BUTTON_PERIOD_TIME_MS` 5 → 10（减半按键轮询）
-2. 关掉 `LV_DRAW_SW_ASM_NONE`，让 LVGL 走优化路径
-3. 只开 RGB565 一种像素格式
-4. 绘制缓冲 8 → 12 或 16（**改完必须测 `largest`**）
-5. 瀑布改手动 flush，绕开 LVGL 脏区机制（改动大）
-
+1. `CONFIG_BUTTON_PERIOD_TIME_MS` 5 → 10 (halve key polling)
+2. disable `LV_DRAW_SW_ASM_NONE` so LVGL takes the optimised path
+3. keep RGB565 as the only pixel format
+4. draw buffer 8 → 12 or 16 (**measure `largest` afterwards**)
+5. manual waterfall flush, bypassing LVGL's dirty-area mechanism (large change)
 
 ---
 
-## 11. 编译与统计开关
+## 11. Build and statistics switches
 
-| 项 | 值 | 结论 |
+| Item | Value | Conclusion |
 |---|---|---|
-| `CONFIG_COMPILER_OPTIMIZATION_PERF` | `-O2` | **保持**。flash 还剩 83%，不缺空间；CPU 是瓶颈，`-Os` 会慢 5-15%，`-O3` 只快 2-5% 且有编译器激进优化风险 |
-| `CONFIG_MRRC_PROFILE` | **关闭** | 曾开着，每分钟 dump 一次 CPU/堆/解码统计 |
-| `CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS` | **关闭** | 曾开着 —— **每个 FreeRTOS tick 都执行计时钩子**，是排查期最大的一笔常驻开销 |
-| `OPTIMIZATION_ASSERTIONS_ENABLE` | 开 | 保留，排查期有用 |
-| `STACK_CHECK_MODE_NONE` | 关 | 正确，省开销 |
+| `CONFIG_COMPILER_OPTIMIZATION_PERF` | `-O2` | **keep**. Flash is 83% free, space is not the constraint; CPU is, and `-Os` costs 5-15% while `-O3` gains 2-5% with more aggressive-optimisation risk |
+| `CONFIG_MRRC_PROFILE` | **off** | was on, dumping CPU/heap/decode once a minute |
+| `CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS` | **off** | was on — **a timing hook on every FreeRTOS tick**, the largest standing cost during investigation |
+| `OPTIMIZATION_ASSERTIONS_ENABLE` | on | keep; useful while debugging |
+| `STACK_CHECK_MODE_NONE` | off | correct; saves overhead |
 
-排查期间加过、现已全部移除的诊断代码：
+Diagnostic code added during investigation and since removed:
 
-- `mrrc_audio_drop_detail()` 的 lock/full 分类计数
-- LVGL 事件注册计数日志（判定修复保留）
-- `update_plot()` 里的 `plot:` 频谱数值 dump
-- `mrrc_ui.c` 中未使用的 `esp_log.h`
+- the lock/full classification in `mrrc_audio_drop_detail()`
+- LVGL event registration counting
+- the `plot:` spectrum dump in `update_plot()`
+- an unused `esp_log.h` in `mrrc_ui.c`
 
-保留的轻量日志：启动期 5 次 `HEAP <stage>` 分段统计，以及每 60 秒一行
-`idle free=... audio(frames=... err=... drop=...)`。
+Kept: five `HEAP <stage>` lines during boot, and one
+`idle free=... audio(frames=... err=... drop=...)` line per 60 s.
 
-## 12. 已放弃的方案
+## 12. Approaches abandoned
 
-### I8 调色板瀑布（历史文档 Stage 3）
+### I8 palette waterfall (Stage 3 of the historical plan)
 
-目标是缓冲减半（40 行 18.8 KB → 9.4 KB），理论上还能把瀑布恢复到 60 行。
-实测发现 LVGL 的实现不允许这样做：
+The goal was to halve the buffer (40 rows 18.8 KB → 9.4 KB), in theory allowing
+60 rows again. LVGL's implementation does not permit it:
 
 ```c
 void lv_draw_buf_set_palette(lv_draw_buf_t *draw_buf, uint8_t index, lv_color32_t color)
 {
     lv_color32_t *palette = (lv_color32_t *)draw_buf->data;
-    palette[index] = color;        /* 调色板写在像素缓冲的开头 */
+    palette[index] = color;        /* the palette is written at the start of the pixel buffer */
 }
 ```
 
-**调色板和像素数据共用同一块缓冲**：调色板占前 256 字节，而瀑布推送从
-offset 0 开始写索引，两者互相覆盖 —— 表现是瀑布整块不可见。
-要支持需要自己给调色板留空间并让 canvas 指向偏移后的像素区，改动面比收益大。
+**Palette and pixel data share one buffer**: the palette occupies the first 256
+bytes while the waterfall writes indices from offset 0, so they overwrite each
+other — the waterfall simply disappears. Supporting it would mean reserving space
+for the palette and pointing the canvas at the shifted pixel area: more change
+than gain.
 
-### Q8 定点 EMA 的一次踩坑
+### A Q8 fixed-point EMA mistake
 
-第一版把原始值直接加进 Q8 累加器（漏了 `<< 8`），累加器衰减到 0，
-频谱画成贴底直线。诊断输出救了这个 bug：
-
-```
-plot: v=0..0  y=44..44  raw0=109 raw1=115    <- raw 有值，>>8 后全 0
-```
-
-## 13. 最终配置速查
+The first version added raw values into the Q8 accumulator (forgetting `<< 8`);
+the accumulator decayed to zero and the trace drew flat along the bottom. A
+diagnostic print saved it:
 
 ```
-BSP_LVGL_DRAW_BUFFER_LINES   24          显示缓冲区行数
-CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM  y LVGL 热函数进 IRAM
-FFT_ALPHA_Q8                 77 (=0.30)  Q8 定点 EMA
+plot: v=0..0  y=44..44  raw0=109 raw1=115    <- raw has values, all zero after >>8
+```
+
+## 13. Final configuration at a glance
+
+```
+BSP_LVGL_DRAW_BUFFER_LINES   24           draw buffer lines
+CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM  y LVGL hot functions into IRAM
+FFT_ALPHA_Q8                 77 (=0.30)  Q8 fixed-point EMA
 REFRESH_MS                   300         3.3 Hz
-WF_H                         40          瀑布行数 (RGB565 18.8 KB)
-PLOT_H                       45          频谱高
-AUD_RB_BYTES                 8192        ~250 ms 抖动缓冲
-swapp_bytes                  false       面板侧 RAMCTRL(0xB0) 小端
+WF_H                         40          waterfall rows (RGB565 18.8 KB)
+PLOT_H                       45          trace height
+AUD_RB_BYTES                 8192        ~250 ms jitter buffer
+swapp_bytes                  false       panel-side RAMCTRL(0xB0) little-endian
 CONFIG_COMPILER_OPTIMIZATION_PERF      y  -O2
 CONFIG_MRRC_PROFILE                     n
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS n
 ```
 
-稳态实测：`taskLVGL 23%`、`IDLE 56%`、`free 55K / largest 25K`、
-`err=0`、丢帧稳定不再增长。
+Steady-state measurement at that point: `taskLVGL 23%`, `IDLE 56%`,
+`free 55K / largest 25K`, `err=0`, drops stable and not growing.
+
+> Note: `REFRESH_MS` and `AUD_RB_BYTES` above are the values at the time of
+> writing; §3.6 explains why the tick moved to 190 ms, and
+> [transport tuning](transport-tuning.md) records the 16 KB ring.
 
 ---
 
-## 14. 外部优化建议的核实记录
+## 14. Verification of external optimisation suggestions
 
-一份外部评审提了三条建议。逐条核实的结果如下，记下来避免以后重复讨论。
+An outside review made four suggestions. Each was checked; the results are here
+so they are not debated twice.
 
-### 建议「删掉 s_prev / s_cur / s_t，每帧直接压一行」
+### "Delete `s_prev` / `s_cur` / `s_t` and push one row per frame"
 
-**部分成立。** `s_t` 在改 190 ms 时已删除，插值也已由 `t_permille >= 1000`
-的分支绕过。但 `s_prev` / `s_cur` 的成员确实还留着 —— 本轮把它们清理掉：
+**Partly right.** `s_t` was already deleted with the 190 ms change and the
+interpolation branch is bypassed by `t_permille >= 1000`. But the `s_prev` /
+`s_cur` members remained, and were cleaned up:
 
-- `s_prev[SCR_W]` 删除（240 字节）
-- `wf_push(int t_permille)` 改为 `wf_push(void)`，插值分支整个去掉
-- `s_pts` 从 `max(BINS, SCR_W)` = 850 点改为 `SCR_W` = 240 点
+- `s_prev[SCR_W]` deleted (240 bytes)
+- `wf_push(int t_permille)` became `wf_push(void)`; the interpolation branch is gone
+- `s_pts` went from `max(BINS, SCR_W)` = 850 points to `SCR_W` = 240 points
 
-最后一条是本轮发现的**真实浪费**：`lv_line_set_points()` 一直只传 240 个点，
-但数组按 850 点分配，每个顶点 8 字节，白占 **4880 字节 .bss**。
+That last one was the **real waste** found: `lv_line_set_points()` only ever
+passed 240 points, but the array was sized for 850 at 8 bytes per vertex — 4880
+bytes of `.bss` for nothing.
 
-### 建议「把 850 点折线降采样，否则每次光栅化 849 条线」
+### "Downsample the 850-point polyline, or every rasterisation draws 849 lines"
 
-**不成立。** 代码里早就是：850 个 bin 先做**峰值降采样**到 240 列，再
+**Not true.** The code already peak-downsamples 850 bins to 240 columns and then:
 
 ```c
-lv_line_set_points(s_spec_line, s_pts, SCR_W);   /* 240，不是 850 */
+lv_line_set_points(s_spec_line, s_pts, SCR_W);   /* 240, not 850 */
 ```
 
-LVGL 光栅化的是 239 条线段。这条建议基于「传了 850 点」的误判。
+LVGL rasterises 239 segments. The suggestion was based on the assumption that 850
+points were passed.
 
-### 建议「浮点平滑必须改整数 Q8」/「line_width=1、line_rounded=false」
+### "Floating-point smoothing must become integer Q8" / "line_width=1, line_rounded=false"
 
-**浮点部分已完成**：`FFT_ALPHA_Q8 = 77`（77/256 ≈ 0.30），`update_plot` 的
-映射也改成了 Q16 整数运算 —— 见第 3 节。
+**The floating-point part is done**: `FFT_ALPHA_Q8 = 77` (77/256 ≈ 0.30) and the
+mapping in `update_plot` uses Q16 integer arithmetic — see §3.
 
-**`line_width` / `line_rounded` 不建议改**：线宽 3 与圆角是本板实测出来的
-视觉选择。butt cap 下 LVGL 的抗锯齿线段在陡变处留空隙，整条曲线看起来是
-**一排点**而不是线 —— 这个外观问题是试出来的，不是随手写的。
+**`line_width` / `line_rounded` should not change**: width 3 with rounded joints
+is a visual choice measured on this panel. With butt caps LVGL's anti-aliased
+segments leave gaps at steep transitions and the whole trace reads as **a row of
+dots** rather than a line. That appearance was found by trying it.
 
-### 建议「瀑布改 LV_COLOR_FORMAT_I8，60 行只要 15.4 KB」
+### "Switch the waterfall to LV_COLOR_FORMAT_I8; 60 rows would be 15.4 KB"
 
-**已试验并放弃。** 见第 12 节：LVGL 把调色板存在**像素缓冲的开头**
-（`lv_draw_buf_set_palette` 直接写 `draw_buf->data`），而瀑布推送从 offset 0
-开始写索引，两者互相覆盖 —— 表现是整块瀑布不可见。要支持需要自己给调色板
-预留空间并让 canvas 指向偏移后的像素区，改动面大于收益。
+**Tried and abandoned.** See §12: LVGL stores the palette **at the start of the
+pixel buffer** (`lv_draw_buf_set_palette` writes `draw_buf->data` directly) while
+the waterfall writes indices from offset 0, so the two overwrite each other and
+the waterfall disappears. Supporting it needs reserved palette space and a canvas
+pointing at the shifted pixels — more change than gain.
 
-建议中「240*60 + 1024 = 15.4 KB」的算法也低估了实际需求：调色板不是独立的
-1024 字节头部，而是与像素争用同一块内存。
+The suggestion's arithmetic ("240*60 + 1024 = 15.4 KB") also underestimates the
+need: the palette is not a separate 1024-byte header but shares the same buffer.
 
-### 建议「提高音频任务优先级」
+### "Raise the audio task priority"
 
-**已经是这样。** `audio` 优先级 8，LVGL 任务优先级 4（`ESP_LVGL_PORT_INIT_CONFIG`
-的默认值）。音频一直比渲染高。
-
+**Already the case.** `audio` runs at priority 8, the LVGL task at 4 (the
+`ESP_LVGL_PORT_INIT_CONFIG` default). Audio has always been above rendering.
 
 ---
 
-## 15. 优化全程前后对比
+## 15. Before and after, across the whole optimisation
 
-### CPU（稳态，`CONFIG_MRRC_PROFILE` 临时开启采样所得）
+### CPU (steady state, sampled with `CONFIG_MRRC_PROFILE` temporarily on)
 
-| 阶段 | taskLVGL | IDLE | 说明 |
+| Stage | taskLVGL | IDLE | Note |
 |---|---|---|---|
-| **起点** | **58%** | **14%** | 绘制缓冲 8 行、10 Hz tick、浮点 EMA |
-| 绘制缓冲 12 行 | 43–49% | 24% | |
-| 绘制缓冲 32 行 + IRAM | 20–26% | 58% | 余量不足（largest 18K） |
-| 绘制缓冲 24 行 | 23% | 56% | 用 3 点 CPU 换 6K 内存 |
-| **终点（190 ms tick）** | **33–42%** | **32–45%** | 刷新率提到 5.26 Hz，与电台扫描对齐 |
+| **start** | **58%** | **14%** | 8-line draw buffer, 10 Hz tick, floating-point EMA |
+| draw buffer 12 lines | 43–49% | 24% | |
+| draw buffer 32 lines + IRAM | 20–26% | 58% | not enough headroom (`largest` 18K) |
+| draw buffer 24 lines | 23% | 56% | 3 CPU points for 6K of memory |
+| **end (190 ms tick)** | **33–42%** | **32–45%** | 5.26 Hz, matched to the radio's sweep |
 
-**最终 CPU 比起点低约 16–25 个百分点**，而刷新率反而是起点的 1.6 倍
-（起点 10 Hz tick 但数据丢 38%、瀑布靠插值；终点 5.26 Hz 且每帧真实）。
+**Final CPU is 16–25 points below the start**, while the refresh rate is 1.6×
+higher (the start had a 10 Hz tick but discarded 38% of the data and interpolated
+the waterfall; the end is 5.26 Hz with every frame real).
 
-### 内存
+### Memory
 
-| 阶段 | free | largest | min |
+| Stage | free | largest | min |
 |---|---|---|---|
-| 起点 | 49–55K | 44K | 21K |
-| 绘制缓冲 32 行 | 49K | **18K** | 15K |
-| 绘制缓冲 24 行 | 52K | 24K | 21K |
-| **终点** | **58–60K** | **27–28K** | 24K |
+| start | 49–55K | 44K | 21K |
+| draw buffer 32 lines | 49K | **18K** | 15K |
+| draw buffer 24 lines | 52K | 24K | 21K |
+| **end** | **58–60K** | **27–28K** | 24K |
 
-`largest` 是 PTT 的关键指标（TLS 需 ~16 KB 连续），终点比起点低 16K 但**仍
-有 1.7 倍余量**；`free` 反而比起点高 5–9K（因为清掉了 `s_pts` 的 4880 字节
-浪费、去掉 850 点数组与 `s_prev`）。
+`largest` is the PTT metric (TLS needs ~16 KB contiguous); the end is 16K below
+the start but still has **1.7× margin**, while `free` ended 5–9K *higher* than the
+start (the 4880-byte `s_pts` waste, the 850-point array and `s_prev` are gone).
 
-### 其他
+### Other
 
-| 项 | 起点 | 终点 |
+| Item | Start | End |
 |---|---|---|
-| bin 大小 | 0x177de0 | 0x15b250（小 114 KB，像素格式精简） |
-| 字模套数 | 3（12/14/28） | 2（12/44） |
-| 频谱数据利用率 | 62%（丢 38%） | **100%** |
-| 瀑布内容 | 60% 插值合成 | **100% 实测** |
-| 常驻统计开销 | 每 tick 记账钩子 | 已关闭 |
+| bin size | 0x177de0 | 0x15b250 (114 KB smaller, pixel formats trimmed) |
+| font faces | 3 (12/14/28) | 2 (12/44) |
+| spectrum data used | 62% (38% discarded) | **100%** |
+| waterfall content | 60% interpolated | **100% measured** |
+| standing statistics cost | tick hook per tick | disabled |
 
-### 音质相关
+### Audio quality at that point
 
-| 项 | 状态 |
+| Item | State |
 |---|---|
-| RX 增益削波 | 服务器侧 +18 dB → 已调低（用户操作） |
-| RX 采样率 | 16 kHz，服务器 44.1→48→16 双重采样（可再优化，收益小） |
-| TX 采样率 | **16 kHz**（codec 在 48k 下麦克风失效，只能 16k） |
-| 音频丢帧 | `err=0`；`drop` 在 190 ms 下小幅增长，听感无断续 |
+| RX gain clipping | server side +18 dB → lowered (operator action) |
+| RX sample rate | 16 kHz; the server resamples 44.1→48→16 (could be improved, small gain) |
+| TX sample rate | **16 kHz** (the codec's microphone fails at 48k, so 16k it is) |
+| Audio drops | `err=0`; `drop` grows slightly at 190 ms, not audible as break-up |

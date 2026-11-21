@@ -93,9 +93,10 @@ CONFIG_OPUS_PSEUDOSTACK_SIZE=60000
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 # 日志：保留 INFO（运行期诊断仍需要），但热路径里的逐帧日志已在代码层删除。
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-# 诊断用：每分钟多打一行 link/txlink（收字节、欠载、I2S 写阻塞、发射发送耗时）。
-# 排查卡顿时打开；没有待查问题时可以关掉。
-CONFIG_MRRC_PROFILE=y
+# 排查卡顿时设为 y：每分钟多打 link / ws / txlink 三行（收字节、环空唤醒、
+# I2S 写阻塞、发射发送耗时）。实测数据与排查方法见 docs/transport-tuning.md。
+# 出货构建保持关闭。
+# CONFIG_MRRC_PROFILE is not set
 
 # ── LVGL 性能（实测，见 docs/optimization-notes.md 3.4）────────────────
 # 官方指南：帧缓冲 <10% 屏面积有"严重负面影响"。240x320 的 10% = 32 行。
