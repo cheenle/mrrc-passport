@@ -51,10 +51,15 @@ CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
 # 只在平均 RTT 下勉强够，RTT 一尖峰就掉到 27 KB/s 以下，服务端的 write 被反压
 # （它的日志里叫 pump stall），音频就以突发形式到达、设备侧卡顿。
 # 实测：同 Wi-Fi 的 Linux 盒子能稳定收到 50 帧/秒音频；设备只有 18.5 帧/秒。
-# 实测两次：默认 5760 与 16384 都试过，设备接收速率没有区别（27.5 / 20.9 KB/s），
-# 说明瓶颈不是 TCP 窗口。保持默认。
-# CONFIG_LWIP_TCP_WND_DEFAULT=5760
-# CONFIG_LWIP_TCP_SND_BUF_DEFAULT=5760
+# --- 设备接收能力（下行 30 KB/s 音频 + 15 KB/s 频谱）---
+# 只加大窗口无效，真正卡住的是"窗口背后的队列"：
+#   TCP_RECVMBOX_SIZE 6   每连接只有 6 个 pbuf 能排队给应用，满了就不再收
+#   RX_BA_WIN 6           A-MPDU 块确认窗口只有 6，突发时收不进
+# 三者一起抬才有意义；窗口按 8 个 MSS 取。
+CONFIG_LWIP_TCP_WND_DEFAULT=11520
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=8
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=8
+CONFIG_ESP_WIFI_RX_BA_WIN=16
 
 # --- TLS ---
 # TLS 会话是本项目最贵的一项固定开销（每条连接十几 KB）。已定策略：V1 只开

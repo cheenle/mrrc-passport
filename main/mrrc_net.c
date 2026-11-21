@@ -51,6 +51,12 @@ static const char *TAG = "net";
  * drawn — and on this board every byte of it shares the one TCP connection
  * with the uplink audio. */
 static volatile bool s_tx_busy;
+
+/* Every payload byte that arrives on the socket, whatever its type.  Compared
+ * with the audio-only counter in mrrc_audio.c this says whether a shortfall is
+ * the device's receive ceiling (both numbers drop together) or the server
+ * sending less audio than it sends spectrum. */
+static uint32_t s_ws_rx_bytes;
 #define WS_TASK_STACK  6144
 #define NET_TASK_STACK 6144
 #define TOKEN_MAX      256
@@ -276,6 +282,8 @@ static void handle_ctrl_text(const char *payload, int len)
 
 /* ── WebSocket ───────────────────────────────────────────────────────── */
 
+uint32_t mrrc_net_ws_rx_bytes(void) { return s_ws_rx_bytes; }
+
 static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg; (void)base;
@@ -327,6 +335,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         /* Binary frames on this socket are downlink audio. */
         if (ev->op_code == 0x02) {
             if (!ev->data_ptr || ev->data_len <= 0) break;
+            s_ws_rx_bytes += (uint32_t)ev->data_len;
             /* Two kinds of binary share this socket, distinguished by the
              * channel byte the server puts in front of each frame:
              *   [0x00] rx audio, [0x02] spectrum (server: TERMINAL_CHAN_*).

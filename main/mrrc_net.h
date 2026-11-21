@@ -57,6 +57,8 @@ void mrrc_net_start(void);
 bool mrrc_net_up(void);
 /* Current AP signal in dBm, or 0 when there is no station connection. */
 int mrrc_net_rssi(void);
+/* Payload bytes received on /WSterminal (audio + spectrum), for the diag line. */
+uint32_t mrrc_net_ws_rx_bytes(void);
 
 /* Control writes (server-side: {"type":"set","field":...,"value":...}). */
 void mrrc_net_set_freq(int32_t hz);

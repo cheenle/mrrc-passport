@@ -447,7 +447,7 @@ void app_main(void)
             size_t lused = 0;
             mrrc_audio_link_stats(&lrx, &lun, &lwr, &lused);
             /* Deltas, not totals: the interesting value is this minute's rate. */
-            static uint32_t p_rx, p_un; static int64_t p_us;
+            static uint32_t p_rx, p_un, p_wrx; static int64_t p_us;
             const int64_t now_us = esp_timer_get_time();
             const double dt = p_us ? (double)(now_us - p_us) / 1e6 : 0.0;
             if (dt > 1.0) {
@@ -458,11 +458,14 @@ void app_main(void)
                          (unsigned)lwr, (unsigned)lused, (unsigned)16384,
                          (unsigned)mrrc_audio_rebuffers(), mrrc_net_rssi());
             }
+            const uint32_t wrx = mrrc_net_ws_rx_bytes();
             unsigned tsm = 0, tslow = 0, tloop = 0, tstall = 0;
             mrrc_tx_link_stats(&tsm, &tslow, &tloop, &tstall);
+            ESP_LOGI(TAG, "ws: total=%.1f KB/s (audio above is a subset)",
+                     (double)(wrx - p_wrx) / dt / 1024.0);
             ESP_LOGI(TAG, "txlink: send_max=%u us slow=%u loop_max=%u us stalls=%u",
                      (unsigned)tsm, (unsigned)tslow, (unsigned)tloop, (unsigned)tstall);
-            p_rx = lrx; p_un = lun; p_us = now_us;
+            p_rx = lrx; p_un = lun; p_wrx = wrx; p_us = now_us;
             /* Per-task CPU needs the tick hook; the link counters above do not,
              * so keep the two switches independent. */
 #if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
