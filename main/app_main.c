@@ -443,8 +443,30 @@ void app_main(void)
                               "(%.1f%% of a 20 ms frame)",
                          (long long)(dus / afr), (unsigned)afr,
                          100.0 * (double)dus / (double)afr / 20000.0);
+            uint32_t lrx = 0, lun = 0, lwr = 0;
+            size_t lused = 0;
+            mrrc_audio_link_stats(&lrx, &lun, &lwr, &lused);
+            /* Deltas, not totals: the interesting value is this minute's rate. */
+            static uint32_t p_rx, p_un; static int64_t p_us;
+            const int64_t now_us = esp_timer_get_time();
+            const double dt = p_us ? (double)(now_us - p_us) / 1e6 : 0.0;
+            if (dt > 1.0) {
+                ESP_LOGI(TAG, "link: rx=%.1f KB/s underruns=%u/s wr_max=%u us "
+                              "rb_used_max=%u/%u rssi=%d",
+                         (double)(lrx - p_rx) / dt / 1024.0,
+                         (unsigned)((double)(lun - p_un) / dt),
+                         (unsigned)lwr, (unsigned)lused, (unsigned)16384,
+                         mrrc_net_rssi());
+            }
+            p_rx = lrx; p_un = lun; p_us = now_us;
+            /* Per-task CPU needs the tick hook; the link counters above do not,
+             * so keep the two switches independent. */
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
             vTaskGetRunTimeStats(buf);
             ESP_LOGI(TAG, "cpu:\n%s", buf);
+#else
+            (void)buf;
+#endif
         }
 #endif
         unsigned k = 0, kf = 0, kfr = 0, ksf = 0, krf = 0, kld = 0;

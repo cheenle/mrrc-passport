@@ -26,6 +26,9 @@ void mrrc_audio_suspend(void);
 void mrrc_audio_resume(void);
 
 void mrrc_audio_stats(uint32_t *frames, uint32_t *errors, uint32_t *drops);
+/* Stutter root-cause counters; see the comment on s_rx_bytes in mrrc_audio.c. */
+void mrrc_audio_link_stats(uint32_t *rx_bytes, uint32_t *underruns,
+                           uint32_t *wr_max_us, size_t *used_max);
 
 /* Profiling: total frames played and the accumulated time spent in the audio
  * path.  dec_us is always 0 now that no decoder is linked in; the parameter is

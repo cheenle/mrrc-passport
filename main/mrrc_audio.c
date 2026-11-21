@@ -54,6 +54,20 @@ static SemaphoreHandle_t s_rb_mtx;
 TaskHandle_t s_audio_task_h;
 
 static uint32_t s_frames, s_errors, s_drops;
+/* Root-cause counters for the stutter investigation (CONFIG_MRRC_PROFILE only).
+ *
+ *   rx_bytes   payload bytes the socket actually delivered — compare with the
+ *              31.3 KB/s a healthy link carries; if it matches, frames are only
+ *              being coalesced into fewer rb_put() calls.
+ *   underruns  times the audio task woke to an empty ring while it should have
+ *              been playing.  Each one is a gap the DMA fills with silence.
+ *   wr_max_us  worst single bsp_audio_write() block.  One 20 ms frame should
+ *              block about 20 ms; much less means the DMA is not pacing us, much
+ *              more means we are waiting on the codec.
+ *   used_max   ring high-water mark; sitting at AUD_RB_BYTES means the producer
+ *              outruns the consumer. */
+static uint32_t s_rx_bytes, s_underruns, s_wr_max_us;
+static size_t   s_used_max;
 static volatile bool s_muted;
 static int s_feed_dbg;    /* first few frames: what do the bytes look like? */   /* downlink muted while transmitting */
 
@@ -75,6 +89,8 @@ static void rb_put(const uint8_t *d, size_t n)
     for (int i = 0; i < 2; i++) { s_rb[s_w] = hdr[i]; s_w = (s_w + 1) % AUD_RB_BYTES; }
     for (size_t i = 0; i < n; i++) { s_rb[s_w] = d[i]; s_w = (s_w + 1) % AUD_RB_BYTES; }
     s_used += n + 2;
+    s_rx_bytes += n;
+    if (s_used > s_used_max) s_used_max = s_used;
     xSemaphoreGive(s_rb_mtx);
 }
 
@@ -110,6 +126,9 @@ static void audio_task(void *arg)
     for (;;) {
         const size_t n = rb_get(frame, sizeof frame, pdMS_TO_TICKS(100));
         if (n == 0) {
+            /* An empty ring while we should be playing is an underrun: the DMA
+             * has nothing to send and fills silence (auto_clear_after_cb). */
+            if (!s_muted && !mrrc_tx_active()) s_underruns++;
             /* rb_get() returns immediately when the buffer is empty; without
              * this delay the loop spins at full speed and starves IDLE, which
              * trips the task watchdog (5 s) on a single-core C3. */
@@ -142,8 +161,11 @@ static void audio_task(void *arg)
             samples = out;
             if (samples == 0) continue;
         }
+        const int64_t t_wr = esp_timer_get_time();
         if (bsp_audio_write((const int16_t *)frame, samples * sizeof(int16_t)) != ESP_OK)
             s_errors++;
+        const uint32_t wr = (uint32_t)(esp_timer_get_time() - t_wr);
+        if (wr > s_wr_max_us) s_wr_max_us = wr;
     }
 }
 
@@ -203,6 +225,15 @@ void mrrc_audio_start(void)
         ESP_LOGE(TAG, "audio task failed");
         return;
     }
+}
+
+void mrrc_audio_link_stats(uint32_t *rx_bytes, uint32_t *underruns,
+                           uint32_t *wr_max_us, size_t *used_max)
+{
+    if (rx_bytes)  *rx_bytes  = s_rx_bytes;
+    if (underruns) *underruns = s_underruns;
+    if (wr_max_us) *wr_max_us = s_wr_max_us;
+    if (used_max)  *used_max  = s_used_max;
 }
 
 void mrrc_audio_stats(uint32_t *frames, uint32_t *errors, uint32_t *drops)
