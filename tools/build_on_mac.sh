@@ -31,6 +31,9 @@ rsync -a --delete \
 # the defaults are newer than it.
 ssh "$MAC" "cd $REMOTE && [ sdkconfig -ot sdkconfig.defaults ] && rm -f sdkconfig sdkconfig.old || true" >/dev/null 2>&1
 
+echo "== apply managed-component patches =="
+ssh "$MAC" "cd $REMOTE && ./tools/patch_ws_nodelay.sh; ./tools/patch_microopus.sh" || true
+
 echo "== build on the mac-mini =="
 ssh "$MAC" "cd $REMOTE && zsh -c '. ~/$IDF_DIR/export.sh >/dev/null 2>&1 && idf.py build'" 2>&1 | tail -25 || {
     echo "BUILD FAILED"; exit 1; }
