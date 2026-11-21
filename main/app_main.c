@@ -452,11 +452,11 @@ void app_main(void)
             const double dt = p_us ? (double)(now_us - p_us) / 1e6 : 0.0;
             if (dt > 1.0) {
                 ESP_LOGI(TAG, "link: rx=%.1f KB/s underruns=%u/s wr_max=%u us "
-                              "rb_used_max=%u/%u rssi=%d",
+                              "rb_used_max=%u/%u rebuf=%u rssi=%d",
                          (double)(lrx - p_rx) / dt / 1024.0,
                          (unsigned)((double)(lun - p_un) / dt),
                          (unsigned)lwr, (unsigned)lused, (unsigned)16384,
-                         mrrc_net_rssi());
+                         (unsigned)mrrc_audio_rebuffers(), mrrc_net_rssi());
             }
             p_rx = lrx; p_un = lun; p_us = now_us;
             /* Per-task CPU needs the tick hook; the link counters above do not,

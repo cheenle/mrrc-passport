@@ -43,6 +43,12 @@ static const char *TAG = "audio";
  * the PTT handshake (16 KB contiguous) still has room. */
 #define AUD_RB_BYTES   16384        /* ~0.51 s of 16 kHz PCM */
 #define AUD_FRAME_MAX  1920         /* 60 ms @ 16 kHz mono */
+/* Playback used to start on the very first frame, so the ring sat near empty
+ * and every network gap became an audible dropout (measured: 3-5 ring-empty
+ * wakeups per second).  Hold playback until this much audio is queued, and
+ * rebuild the cushion if the ring stays dry — 160 ms at 32 KB/s. */
+#define AUD_PREBUF_BYTES 5120       /* ~160 ms */
+#define AUD_REBUFFER_US  200000LL   /* dry for 200 ms -> buffer again */
 /* The codec runs at 16 kHz, not 48 kHz.  Measured on this board: the ES8311
  * ADC delivers ~468 peak at 48 kHz and ~12708 at 16 kHz for the same speech —
  * the microphone path is effectively dead at 48 kHz (ai-passport's own demo
@@ -68,6 +74,10 @@ static uint32_t s_frames, s_errors, s_drops;
  *              outruns the consumer. */
 static uint32_t s_rx_bytes, s_underruns, s_wr_max_us;
 static size_t   s_used_max;
+/* Pre-buffer state: false means "accumulating", true means "playing". */
+static bool     s_playing;
+static uint32_t s_rebuffers;
+static int64_t  s_dry_since;
 static volatile bool s_muted;
 static int s_feed_dbg;    /* first few frames: what do the bytes look like? */   /* downlink muted while transmitting */
 
@@ -124,11 +134,44 @@ static void audio_task(void *arg)
     static uint8_t frame[AUD_FRAME_MAX];
 
     for (;;) {
+        /* Accumulate a cushion before the first write, and rebuild it after a
+         * sustained dry spell.  Without this the DMA is fed frame-by-frame from
+         * an almost empty ring and every network gap is heard as a dropout. */
+        if (!s_playing) {
+            bool ready;
+            if (xSemaphoreTake(s_rb_mtx, pdMS_TO_TICKS(10)) == pdTRUE) {
+                ready = s_used >= AUD_PREBUF_BYTES;
+                xSemaphoreGive(s_rb_mtx);
+            } else {
+                ready = false;
+            }
+            if (!ready) {
+                if (s_muted || mrrc_tx_active()) {
+                    /* Nothing will arrive while keyed; do not start the clock. */
+                    s_dry_since = 0;
+                }
+                /* Must yield: this loop runs at priority 8 and a bare spin
+                 * starves IDLE and trips the task watchdog (it did). */
+                vTaskDelay(pdMS_TO_TICKS(5));
+                continue;
+            }
+            s_playing = true;
+            s_rebuffers++;
+            s_dry_since = 0;
+        }
+
         const size_t n = rb_get(frame, sizeof frame, pdMS_TO_TICKS(100));
         if (n == 0) {
             /* An empty ring while we should be playing is an underrun: the DMA
              * has nothing to send and fills silence (auto_clear_after_cb). */
-            if (!s_muted && !mrrc_tx_active()) s_underruns++;
+            if (!s_muted && !mrrc_tx_active()) {
+                s_underruns++;
+                        if (s_dry_since == 0) s_dry_since = esp_timer_get_time();
+                else if (esp_timer_get_time() - s_dry_since > AUD_REBUFFER_US) {
+                    s_playing = false;      /* fell too far behind: re-buffer */
+                    s_dry_since = 0;
+                }
+            }
             /* rb_get() returns immediately when the buffer is empty; without
              * this delay the loop spins at full speed and starves IDLE, which
              * trips the task watchdog (5 s) on a single-core C3. */
@@ -136,6 +179,7 @@ static void audio_task(void *arg)
             continue;
         }
 
+        s_dry_since = 0;
         /* The uplink is plain 16 kHz Int16 PCM — no codec, no rate change.
          * The server downsamples for us, so the captured buffer goes to I2S
          * unchanged. */
@@ -206,6 +250,8 @@ void mrrc_audio_suspend(void)
     /* Single connection: no socket to free.  Stop playing so the uplink does
      * not howl, and drop whatever is already queued. */
     s_muted = true;
+    s_playing = false;
+    s_dry_since = 0;
     if (s_rb_mtx && xSemaphoreTake(s_rb_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
         s_r = s_w = s_used = 0;
         xSemaphoreGive(s_rb_mtx);
@@ -235,6 +281,8 @@ void mrrc_audio_link_stats(uint32_t *rx_bytes, uint32_t *underruns,
     if (wr_max_us) *wr_max_us = s_wr_max_us;
     if (used_max)  *used_max  = s_used_max;
 }
+
+uint32_t mrrc_audio_rebuffers(void) { return s_rebuffers; }
 
 void mrrc_audio_stats(uint32_t *frames, uint32_t *errors, uint32_t *drops)
 {
