@@ -51,9 +51,8 @@ CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
 # 只在平均 RTT 下勉强够，RTT 一尖峰就掉到 27 KB/s 以下，服务端的 write 被反压
 # （它的日志里叫 pump stall），音频就以突发形式到达、设备侧卡顿。
 # 实测：同 Wi-Fi 的 Linux 盒子能稳定收到 50 帧/秒音频；设备只有 18.5 帧/秒。
-# 实测：把窗口加到 16384 没有提高设备的接收帧率（18.5 → 20.2 帧/秒），
-# 反而让丢帧从 2.2% 升到 24.6% —— 瓶颈在设备的 I2S 消费端，不在链路。
-# 保持默认值，别再加。
+# 实测两次：默认 5760 与 16384 都试过，设备接收速率没有区别（27.5 / 20.9 KB/s），
+# 说明瓶颈不是 TCP 窗口。保持默认。
 # CONFIG_LWIP_TCP_WND_DEFAULT=5760
 # CONFIG_LWIP_TCP_SND_BUF_DEFAULT=5760
 
@@ -86,6 +85,9 @@ CONFIG_OPUS_PSEUDOSTACK_SIZE=60000
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 # 日志：保留 INFO（运行期诊断仍需要），但热路径里的逐帧日志已在代码层删除。
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# 诊断用：每分钟多打一行 link/txlink（收字节、欠载、I2S 写阻塞、发射发送耗时）。
+# 排查卡顿时打开；没有待查问题时可以关掉。
+CONFIG_MRRC_PROFILE=y
 
 # ── LVGL 性能（实测，见 docs/optimization-notes.md 3.4）────────────────
 # 官方指南：帧缓冲 <10% 屏面积有"严重负面影响"。240x320 的 10% = 32 行。
