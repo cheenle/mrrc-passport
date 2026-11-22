@@ -891,3 +891,60 @@ Both are mobile links: `i2s` at 44–47 instead of 50 and `un` still climbing me
 second-long stalls remain, and no ring covers those. What changed is that the
 failure is now graceful — no drop storms, no stutter bursts from a permanently
 full ring.
+
+## 24. Acceptance run against the SDD targets (2026-11-23)
+
+The first run measured against `SDD/05`'s numbers instead of against an
+impression. Conditions, because a number without them is a rumour (SDD/00 §V6):
+
+| | |
+| --- | --- |
+| Build | `v1.3.0-1-g933a4ae` + `CONFIG_MRRC_PROFILE=y` + `CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y` |
+| Unit | ESP32-C3, `98:c3:77:f5:4b:2c`, battery 94% (4 109 mV) |
+| Server | `w103d.vlsc.net`, live session, `rx 31.2 KB/s` |
+| Duration | 12 minutes continuous receive, then one 5 s automatic transmission |
+| Instrument | the device's own profile lines (SDD/00 §0.3, instrument 1) — **not** a reference client |
+
+| NFR | Target | Measured | Verdict |
+| --- | --- | --- | --- |
+| NFR-001 | underruns ≤2/s, `rebuf` not growing | **0–18/s** (11 samples, mean 6.5/s), `rebuf` 2 → 9 | **FAIL** |
+| NFR-002 | 50.0 f/s, `drop=0` | 49.4–50.0 f/s, `drop=0 err=0 full=0 lock=0` on every sample | PASS |
+| NFR-003 | ≥31.3 KB/s audio, ≥49 KB/s total | 31.1–31.3 KB/s audio, 49.2–49.3 KB/s total | marginal |
+| NFR-004 | 50 frames/s, `sendfail=0`, `readfail=0` | 256 frames in 5 s = **51.2/s**, both 0 | PASS (5 s window, not 30 s) |
+| NFR-005 | worst send ≤50 ms | `send_max=19 095 µs`, `slow=0` | PASS |
+| NFR-006 | `peak` 20 000–29 000 | **835** | not assessable — see below |
+| NFR-018 | `largest` ≥24 KB | 28 KB (steady, every sample) | PASS |
+| NFR-019 | `free` ≥49 KB, no downward trend | 49–52 KB, flat over 12 min | PASS |
+| NFR-020 | `taskLVGL` ≤30% | **36%** | **FAIL** |
+| NFR-021 | `IDLE` ≥40% | **33%** | **FAIL** |
+| NFR-022 | waterfall ≤11 KB of `.bss` | 10 624 B (by construction) | PASS |
+| NFR-027 | 16 kHz, ≤0.2% drift, no audio lost to it | 16 kHz, no drift symptom in 12 min | PASS (12 min is short) |
+| NFR-031 | one serial line diagnoses the fault | this run is the example | PASS |
+
+Supporting numbers from the same run, not in the table because no NFR owns them:
+`decode 0 µs/frame` (PCM16, no Opus), `flush 346 KB/s / 2.3 screens/s /
+68 flushes/s`, websocket cost `audio 84 µs`, `spectrum 52 µs`, `json 761 µs` per
+message, DMA free 41–44 KB, audio task stack high-water 7 744 B free.
+
+### What the three failures actually mean
+
+**NFR-001 (underruns).** Not a link problem: `rx` held 31.2 KB/s and `drop=0`.
+The ring oscillates between roughly 13 KB and its 98% mark (16 050/16 384) and the
+cushion does not survive the gaps — 0 to 18 wakeups per second depending on the
+minute, and `rebuf` climbed 2 → 9 across the run. The 160 ms pre-buffer is the
+thing under test here, and at this window it is not holding.
+
+**NFR-020/NFR-021 (CPU).** 36% for `taskLVGL` and 33% `IDLE` are 6–8 points worse
+than the 28–30% / 42–45% recorded on 2026-11-22 (§15, §17, §18). Two explanations
+are possible and this run does not separate them: the profile build measures
+itself (`GENERATE_RUN_TIME_STATS` charges every tick, and the flush/band/ws-cost
+sampling runs once a minute), or the UI has genuinely grown since — the chips bar,
+the 1 px red centre line and the edge-hugging scale row all landed after those
+numbers were taken. SDD/00 §V7 says a changed instrument invalidates history, so
+the next step is one A/B: same build with only the run-time stats off.
+
+**NFR-006 (level).** `peak=835` is not a clipper and not a level fault: the run was
+unattended and nobody spoke, so the peak over 5 s of silence is silence. This is a
+hole in the *method*, not in the firmware — the automated self-test can prove the
+path (256 frames, no failures) but cannot prove the level. Chapter 15 §15.5 now
+says so; a level measurement needs speech at the microphone and a human.

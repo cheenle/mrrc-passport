@@ -118,6 +118,12 @@ A non-zero `sendfail` with a clean `readfail` means the uplink is being throttle
 from below (AD-004 territory). A non-zero `sendfail` **with** W/E lines means the
 session is dying, and the PTT indicator is a symptom, not the fault.
 
+**`peak` needs speech, not a key.** An unattended transmission measures silence
+and reports a low peak (835 measured on 2026-11-23 with nobody speaking) — that is
+the method, not the level. The path is provable without a human (256 frames, zero
+failures); the level is not. A level check is a person speaking at the microphone
+while the line is read.
+
 ## 15.6 Known boundaries
 
 Recorded so that the next investigation does not rediscover them as surprises:
