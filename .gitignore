@@ -5,3 +5,4 @@ sdkconfig
 sdkconfig.old
 *.bin
 sdkconfig.defaults.local
+__pycache__/

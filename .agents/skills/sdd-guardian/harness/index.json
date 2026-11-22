@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "description": "Routing index for the knowledge layer. Maps engineering areas (by file glob and keyword) to typed references into the live docs. Contains NO duplicated content: every ref is resolved by slicing the current heading out of the current file, so this index cannot drift stale from the record it points at. Ref grammar: doc:<path>#<heading substring> — the substring is matched against '#'/'##'/'###' headings in that file.",
+  "always": [
+    "doc:AGENTS.md#§1 Constraints",
+    "doc:AGENTS.md#§6 Acceptance",
+    "doc:docs/design-v1.md#3. Four hard constraints"
+  ],
+  "fallback": ["doc:AGENTS.md#What to read first"],
+  "topics": [
+    {
+      "id": "transport",
+      "title": "Audio transport (PCM16, one socket, uplink/downlink timing)",
+      "files": ["main/mrrc_net.c", "main/mrrc_net.h", "main/mrrc_audio.c", "main/mrrc_audio.h"],
+      "keywords": ["uplink", "downlink", "send_bin", "ws", "websocket", "pcm16", "ring", "buffer", "prebuffer", "nagle", "timeout"],
+      "refs": [
+        "doc:docs/transport-tuning.md#6. Transmit",
+        "doc:docs/transport-tuning.md#1. Downlink",
+        "doc:docs/transport-tuning.md#2. Downlink",
+        "doc:docs/transport-tuning.md#4. Uplink",
+        "doc:docs/transport-tuning.md#5. Uplink",
+        "doc:docs/optimization-notes.md#2. Audio path",
+        "doc:docs/optimization-notes.md#19. Where the network CPU goes"
+      ]
+    },
+    {
+      "id": "ptt",
+      "title": "PTT and transmit path",
+      "files": ["main/mrrc_tx.c", "main/mrrc_tx.h"],
+      "keywords": ["ptt", "tx", "key", "release", "watchdog", "mic", "gain", "clip", "peak"],
+      "refs": [
+        "doc:docs/transport-tuning.md#6. Transmit",
+        "doc:docs/transport-tuning.md#5. Uplink",
+        "doc:AGENTS.md#§1 Constraints"
+      ]
+    },
+    {
+      "id": "ui",
+      "title": "Display, layout and waterfall",
+      "files": ["main/mrrc_ui.c", "main/mrrc_ui.h", "components/bsp/**"],
+      "keywords": ["lvgl", "palette", "waterfall", "canvas", "trace", "font", "layout", "tick", "repaint"],
+      "refs": [
+        "doc:docs/UI.md#2. Palette",
+        "doc:docs/UI.md#1. Canvas and refresh",
+        "doc:docs/UI.md#3. Vertical layout",
+        "doc:docs/optimization-notes.md#17. Where the repaint actually goes",
+        "doc:docs/optimization-notes.md#18. The trace",
+        "doc:docs/optimization-notes.md#20. Waterfall storage"
+      ]
+    },
+    {
+      "id": "memory",
+      "title": "Memory and CPU budget",
+      "files": ["main/app_main.c", "sdkconfig.defaults", "partitions.csv"],
+      "keywords": ["heap", "largest", "bss", "psram", "stack", "cpu", "idle", "fragment", "o2", "size"],
+      "refs": [
+        "doc:docs/design-v1.md#4. Memory budget",
+        "doc:docs/optimization-notes.md#0. Baseline",
+        "doc:docs/optimization-notes.md#15. Before and after",
+        "doc:docs/optimization-notes.md#16. The transport round"
+      ]
+    },
+    {
+      "id": "provisioning",
+      "title": "Provisioning and network selection",
+      "files": ["main/mrrc_cfg.c", "main/mrrc_cfg.h", "main/mrrc_prov.c", "main/mrrc_prov.h", "main/Kconfig.projbuild"],
+      "keywords": ["nvs", "config", "kconfig", "provision", "softap", "ap", "ssid", "wifi", "network", "switch", "health"],
+      "refs": [
+        "doc:docs/provisioning.md#Why NVS over Kconfig",
+        "doc:docs/provisioning.md#Trigger conditions",
+        "doc:docs/optimization-notes.md#23. Several networks",
+        "doc:docs/optimization-notes.md#22. Surviving a mobile link"
+      ]
+    },
+    {
+      "id": "build",
+      "title": "Build, flash and release",
+      "files": ["tools/**", ".github/workflows/**", "CMakeLists.txt", "partitions.csv"],
+      "keywords": ["build", "flash", "ci", "release", "idf", "cmake", "actionlint", "verify", "archive"],
+      "refs": [
+        "doc:AGENTS.md#§4 Build and flash",
+        "doc:AGENTS.md#§2 The three IPv6 switches",
+        "doc:docs/development/ci/CI-build-and-release.md#Release"
+      ]
+    },
+    {
+      "id": "hardware",
+      "title": "Board facts (codec, clock, no PSRAM, no APLL)",
+      "files": ["components/bsp/**", "docs/hardware-design/**"],
+      "keywords": ["es8311", "i2s", "mclk", "apll", "codec", "adc", "dac", "pins", "battery", "charge"],
+      "refs": [
+        "doc:docs/design-v1.md#2. Hardware facts",
+        "doc:docs/design-v1.md#3.1 Full duplex shares the clock",
+        "doc:docs/design-v1.md#3.2 No APLL",
+        "doc:docs/design-v1.md#3.3 No PSRAM"
+      ]
+    },
+    {
+      "id": "governance",
+      "title": "Repository rules and this guardian",
+      "files": [".agents/skills/sdd-guardian/**"],
+      "keywords": ["guardian", "constraint", "rule", "block", "sdd", "hook", "selftest"],
+      "refs": [
+        "doc:docs/sdd-guardian.md#1. What a rule is",
+        "doc:docs/sdd-guardian.md#3. Adding a rule",
+        "doc:AGENTS.md#§6 Acceptance"
+      ]
+    }
+  ]
+}

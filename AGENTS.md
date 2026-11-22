@@ -20,10 +20,16 @@ this file.
 | **Stutter / performance / dropped frames** | **`docs/design-v1.md` §5.1 + §12.1** (the order to diagnose in; do not start by enlarging buffers) |
 | Memory | `docs/design-v1.md` §4, especially §4.3 (`largest` is the only number to watch) |
 | Pins and parts | `components/bsp/include/bsp_pins.h` (single source of truth) |
+| **Before editing any file** | `python3 .agents/skills/sdd-guardian/harness/sdd_context.py brief <files>` — the applicable rules plus the post-mortem sections that explain them (`docs/sdd-guardian.md`) |
 
 ## §1 Constraints that must not change
 
-Each one corresponds to a real-board crash or a silent transmitter:
+Each one corresponds to a real-board crash or a silent transmitter. The
+mechanically checkable ones are encoded in
+`.agents/skills/sdd-guardian/harness/constraints.json` and enforced by
+`tools/validate.sh --static` and the `governance` CI job; the rest are review
+criteria. Rules are added only after the fact, never pre-emptively — see
+`docs/sdd-guardian.md` §3.
 
 1. **The codec is fixed at 16 kHz.** The ES8311 is nearly deaf when capturing at
    48 kHz (peak 468 versus 12708). The server wants 48 kHz, so software
@@ -104,6 +110,7 @@ Wi-Fi, the server address, and passwords belong in the local configuration only:
 | UI / drawing | no `task_wdt` (an over-long LVGL render triggers it) |
 | Memory | idle `free / largest` no worse than before the change |
 | Any change | no `Guru Meditation` and no `task_wdt` on the serial log |
+| Any change | `python3 .agents/skills/sdd-guardian/harness/sdd_context.py check --staged` exits 0 (or the hit is justified in the commit message) |
 
 Diagnose from the once-a-minute idle line only:
 

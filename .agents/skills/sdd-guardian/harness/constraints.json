@@ -1,0 +1,300 @@
+{
+  "version": 1,
+  "description": "Machine-readable constraint registry for the MRRC terminal firmware (ESP32-C3). Every rule here is a trap this project already fell into once; the incident is named in sdd_ref so the next person can read what it cost instead of rediscovering it. severity: block = reject the edit (CI + pre-tool hook), warn = allow but surface, info = guidance printed by brief only. Kinds: pattern (regex scan), order (pattern A must appear before pattern B in one file), numeric (a captured number must stay under a bound).",
+  "rules": [
+    {
+      "id": "secrets-in-tracked-config",
+      "title": "Wi-Fi and server credentials never enter a tracked file",
+      "severity": "block",
+      "kind": "pattern",
+      "sdd_ref": "AGENTS §5; docs/development/engineering/environment-setup.md",
+      "scope": [
+        "main/**",
+        "sdkconfig.defaults",
+        "sdkconfig.defaults.*",
+        "tools/**"
+      ],
+      "exclude_scope": [
+        "sdkconfig.defaults.local",
+        "**/*.local"
+      ],
+      "patterns": [
+        "CONFIG_MRRC_(WIFI_PASSWORD|SERVER_PASSWORD|PROV_PASSWORD)[A-Z0-9_]*\\s*[= ]\\s*\"[^\"]+\"",
+        "CONFIG_MRRC_PROV_AP_PASSWORD\\s*[= ]\\s*\"[^\"]+\""
+      ],
+      "message": "Credentials live only in the gitignored sdkconfig.defaults.local. A password committed here is a password in every fork and every release tarball, and this repo publishes source-only releases.",
+      "selftest_sample": {
+        "path": "sdkconfig.defaults",
+        "content": "CONFIG_MRRC_WIFI_PASSWORD=\"xy.cheenle\"\n"
+      },
+      "selftest_clean": {
+        "path": "sdkconfig.defaults",
+        "content": "CONFIG_MRRC_WIFI_PASSWORD=\"\"\n"
+      },
+      "ignore_comments": false
+    },
+    {
+      "id": "palette-before-heat-init",
+      "title": "heat_init() runs before anything reads the palette",
+      "severity": "block",
+      "kind": "order",
+      "sdd_ref": "docs/UI.md §2; docs/optimization-notes.md waterfall palette",
+      "scope": [
+        "main/mrrc_ui.c"
+      ],
+      "first": "\\bheat_init\\s*\\(\\s*(void)?\\s*\\)\\s*;",
+      "first_exclude": "static\\s+void\\s+heat_init",
+      "then": "lv_canvas_set_palette|s_wf_buf\\s*\\+\\s*WF_PAL_BYTES",
+      "message": "heat_init() fills the colour ramp. Read it before it has run and every waterfall row is black — the symptom looks like a canvas bug, which is why this cost an afternoon. Keep the init call above the first palette consumer.",
+      "selftest_sample": {
+        "path": "main/mrrc_ui.c",
+        "content": "static void heat_init(void){}\nvoid setup(void){ lv_canvas_set_palette(img, 0, c); heat_init(); }\n"
+      },
+      "selftest_clean": {
+        "path": "main/mrrc_ui.c",
+        "content": "static void heat_init(void){}\nvoid setup(void){ heat_init(); lv_canvas_set_palette(img, 0, c); }\n"
+      }
+    },
+    {
+      "id": "uplink-send-timeout",
+      "title": "The uplink frame timeout stays at or below 200 ms",
+      "severity": "block",
+      "kind": "numeric",
+      "sdd_ref": "docs/transport-tuning.md §6",
+      "scope": [
+        "main/mrrc_net.c",
+        "main/mrrc_net.h"
+      ],
+      "call_pattern": "send_bin\\s*\\([^;]{0,120}?,\\s*([0-9]+)\\s*\\)",
+      "max": 200,
+      "message": "Frames are 20 ms apart. A 500 ms wait does not deliver the frame, it converts link congestion into 2 frames/s while the microphone keeps producing 50 — and on a mobile link the write failure then tears the whole socket down, which the operator reads as 'the PTT released itself' (2026-11-22). Losing one frame is honest; blocking is not.",
+      "selftest_sample": {
+        "path": "main/mrrc_net.c",
+        "content": "if (send_bin(h, frame, len, 500) != ESP_OK) {}\n"
+      },
+      "selftest_clean": {
+        "path": "main/mrrc_net.c",
+        "content": "if (send_bin(h, frame, len, 100) != ESP_OK) {}\n"
+      }
+    },
+    {
+      "id": "single-terminal-endpoint",
+      "title": "One socket: /WSterminal, never the four-endpoint layout",
+      "severity": "block",
+      "kind": "pattern",
+      "sdd_ref": "docs/transport-tuning.md §6; docs/optimization-notes.md §2",
+      "scope": [
+        "main/**"
+      ],
+      "patterns": [
+        "\"/WS(audioRX|audioTX|radio|spectrum|sdr)\""
+      ],
+      "message": "A single TLS/WS session carries control, RX, TX and spectrum (1-byte channel prefix). Reintroducing a second endpoint reintroduces the tear-down/rebuild settle gap at the start of every transmission, plus a second 32 KB heap of TLS state this chip cannot spare.",
+      "selftest_sample": {
+        "path": "main/mrrc_net.c",
+        "content": "cfg.path = \"/WSaudioRX\";\n"
+      },
+      "selftest_clean": {
+        "path": "main/mrrc_net.c",
+        "content": "cfg.path = \"/WSterminal\";\n"
+      }
+    },
+    {
+      "id": "no-opus-in-firmware",
+      "title": "PCM16 only — there is no Opus decoder in this image",
+      "severity": "block",
+      "kind": "pattern",
+      "sdd_ref": "docs/optimization-notes.md §2.1 (measured, 24 KB + 60% CPU)",
+      "scope": [
+        "main/**"
+      ],
+      "exclude_scope": [
+        "main/Kconfig.projbuild"
+      ],
+      "patterns": [
+        "\\b(?:opus|OPUS|Opus)\\w*"
+      ],
+      "message": "libopus was measured at 24 KB of heap and ~60% of the core on this C3 and was removed. The terminal declares pcm16 and the server widens its own 48 kHz bus down to it; a decoder here would be a regression of the one budget that has no headroom.",
+      "selftest_sample": {
+        "path": "main/mrrc_audio.c",
+        "content": "opus_decoder_create(16000, 1, &err);\n"
+      },
+      "selftest_clean": {
+        "path": "main/mrrc_audio.c",
+        "content": "/* decode PCM16 */\n"
+      }
+    },
+    {
+      "id": "nvs-single-namespace",
+      "title": "Every NVS handle opens the \"mrrc\" namespace",
+      "severity": "block",
+      "kind": "pattern",
+      "sdd_ref": "main/mrrc_cfg.c (namespace mrrc); docs/provisioning.md 'Why NVS over Kconfig'",
+      "scope": [
+        "main/**"
+      ],
+      "patterns": [
+        "nvs_open\\s*\\(\\s*\"(?!mrrc\")[^\"]+\""
+      ],
+      "message": "There are three writers by design — app_main.c (volume, mic gain, step, filter), mrrc_net.c (session token), mrrc_cfg.c (provisioned SSIDs/passwords/server) — and they share one namespace so a single dump shows every key the terminal keeps. A second namespace strands keys exactly when a migration needs to find them.",
+      "selftest_sample": {
+        "path": "main/mrrc_net.c",
+        "content": "nvs_open(\"mrrc_tok\", NVS_READWRITE, &h);\n"
+      },
+      "selftest_clean": {
+        "path": "main/mrrc_net.c",
+        "content": "nvs_open(\"mrrc\", NVS_READWRITE, &h);\n"
+      }
+    },
+    {
+      "id": "diagnostics-not-shipped",
+      "title": "CONFIG_MRRC_PROFILE stays off in shipped defaults",
+      "severity": "block",
+      "kind": "pattern",
+      "sdd_ref": "AGENTS §1; docs/optimization-notes.md §0",
+      "scope": [
+        "sdkconfig.defaults",
+        "sdkconfig.defaults.*"
+      ],
+      "exclude_scope": [
+        "sdkconfig.defaults.local",
+        "**/*.local"
+      ],
+      "patterns": [
+        "^CONFIG_MRRC_PROFILE=y"
+      ],
+      "message": "The profile switch prints link:/ws:/txlink:/ring()/batt= lines several times a second. It is a debugging instrument measured in CPU and UART time; ship it on and the measurement changes the thing being measured.",
+      "selftest_sample": {
+        "path": "sdkconfig.defaults",
+        "content": "CONFIG_MRRC_PROFILE=y\n"
+      },
+      "selftest_clean": {
+        "path": "sdkconfig.defaults",
+        "content": "CONFIG_MRRC_PROFILE=n\n"
+      }
+    },
+    {
+      "id": "lvgl-single-task",
+      "title": "LVGL is touched from taskLVGL (mrrc_ui.c) only",
+      "severity": "warn",
+      "kind": "pattern",
+      "sdd_ref": "docs/optimization-notes.md §3 (taskLVGL 28-30% after the layout rewrite)",
+      "scope": [
+        "main/**"
+      ],
+      "exclude_scope": [
+        "main/mrrc_ui.c",
+        "main/mrrc_ui.h"
+      ],
+      "patterns": [
+        "\\blv_[a-z_]+\\s*\\("
+      ],
+      "message": "LVGL has no internal locking. A draw call from the net or audio task corrupts the object tree in ways that show up minutes later as a frozen screen. Route it through mrrc_ui_* (which posts to taskLVGL) instead.",
+      "selftest_sample": {
+        "path": "main/mrrc_net.c",
+        "content": "lv_label_set_text(s_label, txt);\n"
+      },
+      "selftest_clean": {
+        "path": "main/mrrc_net.c",
+        "content": "mrrc_ui_set_status(txt);\n"
+      }
+    },
+    {
+      "id": "no-heap-in-audio-path",
+      "title": "No per-frame heap allocation in the audio or uplink path",
+      "severity": "warn",
+      "kind": "pattern",
+      "sdd_ref": "docs/design-v1.md §4.3 ('largest' is the only number that matters)",
+      "scope": [
+        "main/mrrc_audio.c",
+        "main/mrrc_tx.c",
+        "main/mrrc_net.c"
+      ],
+      "patterns": [
+        "\\b(malloc|calloc|pvPortMalloc|heap_caps_malloc)\\s*\\("
+      ],
+      "message": "Buffers are static (.bss) because the largest free block, not total free heap, is what fails first here. 50 allocations a second turn a 40 KB largest block into 12 KB of fragments — measured, not theoretical.",
+      "selftest_sample": {
+        "path": "main/mrrc_audio.c",
+        "content": "uint8_t *p = malloc(640);\n"
+      },
+      "selftest_clean": {
+        "path": "main/mrrc_audio.c",
+        "content": "static uint8_t p[640];\n"
+      }
+    },
+    {
+      "id": "named-task-stacks",
+      "title": "Task stacks come from named macros, not literals",
+      "severity": "warn",
+      "kind": "pattern",
+      "sdd_ref": "docs/design-v1.md §4; docs/optimization-notes.md §1",
+      "scope": [
+        "main/**"
+      ],
+      "patterns": [
+        "xTaskCreate[^;]{0,200}?,\\s*(1024|2048|3072|4096|6144|8192|10240)\\s*,"
+      ],
+      "message": "Stack budget is a measured quantity on this chip (free=49-58K, largest=36-48K). A literal in a call site is invisible to the budget table and to the next person who has to shrink something.",
+      "selftest_sample": {
+        "path": "main/app_main.c",
+        "content": "xTaskCreate(fn, \"t\", 4096, NULL, 5, NULL);\n"
+      },
+      "selftest_clean": {
+        "path": "main/app_main.c",
+        "content": "xTaskCreate(fn, \"t\", AUD_TASK_STACK, NULL, 8, &h);\n"
+      }
+    },
+    {
+      "id": "ptt-release-never-blocks",
+      "title": "Release is fire-and-forget",
+      "severity": "warn",
+      "kind": "pattern",
+      "sdd_ref": "docs/transport-tuning.md §6; AGENTS §1",
+      "scope": [
+        "main/mrrc_tx.c",
+        "main/app_main.c"
+      ],
+      "patterns": [
+        "ptt_(?:off|release)\\s*\\([^)]*\\)\\s*;?[^;]{0,160}?vTaskDelay",
+        "vTaskDelay[^;]{0,160}?ptt_(?:off|release)\\s*\\("
+      ],
+      "message": "The radio obeys the first release written. A verify loop after it costs hundreds of milliseconds of stuck carrier in the worst case and teaches the operator that the key is slow. Stuck-keyup detection belongs to the watchdog, not to the release path.",
+      "selftest_sample": {
+        "path": "main/mrrc_tx.c",
+        "content": "mrrc_tx_ptt_off(); vTaskDelay(pdMS_TO_TICKS(200));\n"
+      },
+      "selftest_clean": {
+        "path": "main/mrrc_tx.c",
+        "content": "mrrc_tx_ptt_off();\n"
+      }
+    },
+    {
+      "id": "half-duplex-context",
+      "title": "Before touching the uplink, read why transmit used to tear the socket down",
+      "severity": "info",
+      "kind": "pattern",
+      "sdd_ref": "docs/transport-tuning.md §6",
+      "scope": [
+        "main/mrrc_net.c",
+        "main/mrrc_tx.c",
+        "main/mrrc_audio.c"
+      ],
+      "patterns": [],
+      "message": "Server skips downlink audio for a socket that holds the PTT; the device keeps a 100 ms frame timeout. Both halves are load-bearing: remove either and 'PTT releases itself' comes back on a mobile link. The symptom looks like a key problem, so read §6 before concluding anything."
+    },
+    {
+      "id": "docs-sync",
+      "title": "A behaviour change also changes the record",
+      "severity": "info",
+      "kind": "pattern",
+      "sdd_ref": "AGENTS §6 (acceptance per change type)",
+      "scope": [
+        "main/**",
+        "tools/**"
+      ],
+      "patterns": [],
+      "message": "Same change, same commit: docs/optimization-notes.md for a performance number, docs/transport-tuning.md for anything on the audio path, docs/provisioning.md for settings, docs/UI.md for layout, CHANGELOG.md + CHANGELOG.zh_CN.md for user-visible behaviour. Measure first; a number without its condition is a rumour."
+    }
+  ]
+}

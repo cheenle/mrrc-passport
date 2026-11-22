@@ -18,10 +18,14 @@ passport skill、规定 LVGL 二次开发流程）**不适用于本项目**，�
 | **卡顿/性能/丢帧** | **`docs/design-v1.md` §5.1 + §12.1**（判断顺序，别再从"加大缓冲"开始） |
 | 内存 | `docs/design-v1.md` §4，特别是 §4.3（`largest` 是唯一要盯的数） |
 | 引脚与器件 | `components/bsp/include/bsp_pins.h`（单一事实来源） |
+| **动任何文件之前** | `python3 .agents/skills/sdd-guardian/harness/sdd_context.py brief <文件>` —— 适用于这些文件的规则，以及解释它们的复盘段落（说明见 `docs/sdd-guardian.zh_CN.md`） |
 
 ## §1 不可改动的约束
 
-每一条都对应一次真机崩溃或无声：
+每一条都对应一次真机崩溃或无声。其中**机器可判定**的那几条已经写进
+`.agents/skills/sdd-guardian/harness/constraints.json`，由 `tools/validate.sh --static`
+与 CI 的 `governance` 作业执行；其余仍是评审标准。规则只在**事故之后**添加，不做预防性
+预设——见 `docs/sdd-guardian.zh_CN.md` §3。
 
 1. **codec 固定 16 kHz**。ES8311 在 48 kHz 采集近乎失聪（峰值 468 vs 12708）。
    服务端要 48 kHz，靠软件重采样对接；运行期不要调 `bsp_audio_set_format`。
@@ -86,6 +90,7 @@ Wi-Fi、服务端地址与密码只写本地 `sdkconfig`（`idf.py menuconfig` �
 | UI/绘制 | 无 `task_wdt`（LVGL 渲染超时会触发） |
 | 内存相关 | idle 的 `free / largest` 不比改动前差 |
 | 任何改动 | 串口无 `Guru Meditation`、无 `task_wdt` |
+| 任何改动 | `python3 .agents/skills/sdd-guardian/harness/sdd_context.py check --staged` 返回 0（或命中项已在提交信息里说明理由） |
 
 诊断只看串口 60 秒一条的 idle 行：
 

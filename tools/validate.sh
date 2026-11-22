@@ -65,6 +65,12 @@ run_static_checks() {
     python3 tools/check_repo.py
     python3 tools/check_glyphs.py
 
+    # Constraint registry: the rules this firmware already paid for, plus the
+    # registry's own tests (scope reachability, fixtures, live doc refs).
+    # A block hit fails the gate; the catalog must match the registry.
+    python3 .agents/skills/sdd-guardian/harness/sdd_context.py selftest
+    python3 .agents/skills/sdd-guardian/harness/sdd_context.py check
+
     actionlint_bin="$(resolve_actionlint)"
     if [[ -n "${actionlint_bin}" ]]; then
         "${actionlint_bin}" -color .github/workflows/*.yml
