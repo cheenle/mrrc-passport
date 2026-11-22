@@ -15,9 +15,10 @@ with a scope, a detector, a severity, and the incident that produced it. The sam
 registry drives three things: an agent brief before editing, a pre-tool hook that
 can reject an edit, and a CI gate that fails a pull request.
 
-Nothing here is a copy of the prose. `index.json` stores references
-(`doc:docs/transport-tuning.md#6. Transmit`), and the harness slices the current
-file at call time, so editing a doc cannot leave the harness quoting a paragraph
+Nothing here is a copy of the prose. `index.json` stores references — either a
+doc section (`doc:docs/transport-tuning.md#6. Transmit`) or an SDD item
+(`sdd:AD-004`, `sdd:NFR-005`, `sdd:V4`, `sdd:15.3`) — and the harness slices the
+current file at call time, so editing a doc cannot leave the harness quoting a paragraph
 that no longer exists. If a heading is renamed, the guardian's own tests fail.
 
 ## 1. What a rule is

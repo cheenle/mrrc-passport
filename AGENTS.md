@@ -14,6 +14,7 @@ this file.
 
 | Task | Must read |
 |---|---|
+| Any change | **`SDD/` — read chapter 00 first** (verification discipline; then 05 requirements, 08 decisions, 15 transmit safety) |
 | Any change | `docs/design-v1.md` (hardware facts, measured data, every trap we hit) |
 | Audio | §1 here, `docs/design-v1.md` §3.1 / §6 |
 | Network | §2 here, `docs/design-v1.md` §9 |

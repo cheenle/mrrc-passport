@@ -38,3 +38,4 @@
 | --- | --- | --- | --- |
 | `half-duplex-context` | Before touching the uplink, read why transmit used to tear the socket down | `main/mrrc_net.c`, `main/mrrc_tx.c`, `main/mrrc_audio.c` | docs/transport-tuning.md §6 |
 | `docs-sync` | A behaviour change also changes the record | `main/**`, `tools/**` | AGENTS §6 (acceptance per change type) |
+| `verification-discipline` | Every claim carries its measurement point, date and scenario | `SDD/**`, `docs/**`, `**/*.md` | SDD/00-verification-discipline.md §0.2 (V1–V9) |

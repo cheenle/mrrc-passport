@@ -2,18 +2,43 @@
   "version": 1,
   "description": "Routing index for the knowledge layer. Maps engineering areas (by file glob and keyword) to typed references into the live docs. Contains NO duplicated content: every ref is resolved by slicing the current heading out of the current file, so this index cannot drift stale from the record it points at. Ref grammar: doc:<path>#<heading substring> — the substring is matched against '#'/'##'/'###' headings in that file.",
   "always": [
+    "sdd:V1",
+    "sdd:V5",
     "doc:AGENTS.md#§1 Constraints",
     "doc:AGENTS.md#§6 Acceptance",
     "doc:docs/design-v1.md#3. Four hard constraints"
   ],
-  "fallback": ["doc:AGENTS.md#What to read first"],
+  "fallback": [
+    "doc:AGENTS.md#What to read first"
+  ],
   "topics": [
     {
       "id": "transport",
       "title": "Audio transport (PCM16, one socket, uplink/downlink timing)",
-      "files": ["main/mrrc_net.c", "main/mrrc_net.h", "main/mrrc_audio.c", "main/mrrc_audio.h"],
-      "keywords": ["uplink", "downlink", "send_bin", "ws", "websocket", "pcm16", "ring", "buffer", "prebuffer", "nagle", "timeout"],
+      "files": [
+        "main/mrrc_net.c",
+        "main/mrrc_net.h",
+        "main/mrrc_audio.c",
+        "main/mrrc_audio.h"
+      ],
+      "keywords": [
+        "uplink",
+        "downlink",
+        "send_bin",
+        "ws",
+        "websocket",
+        "pcm16",
+        "ring",
+        "buffer",
+        "prebuffer",
+        "nagle",
+        "timeout"
+      ],
       "refs": [
+        "sdd:NFR-015",
+        "sdd:NFR-005",
+        "sdd:15.3",
+        "sdd:AD-004",
         "doc:docs/transport-tuning.md#6. Transmit",
         "doc:docs/transport-tuning.md#1. Downlink",
         "doc:docs/transport-tuning.md#2. Downlink",
@@ -26,9 +51,26 @@
     {
       "id": "ptt",
       "title": "PTT and transmit path",
-      "files": ["main/mrrc_tx.c", "main/mrrc_tx.h"],
-      "keywords": ["ptt", "tx", "key", "release", "watchdog", "mic", "gain", "clip", "peak"],
+      "files": [
+        "main/mrrc_tx.c",
+        "main/mrrc_tx.h"
+      ],
+      "keywords": [
+        "ptt",
+        "tx",
+        "key",
+        "release",
+        "watchdog",
+        "mic",
+        "gain",
+        "clip",
+        "peak"
+      ],
       "refs": [
+        "sdd:AD-004",
+        "sdd:15.5",
+        "sdd:15.3",
+        "sdd:15.2",
         "doc:docs/transport-tuning.md#6. Transmit",
         "doc:docs/transport-tuning.md#5. Uplink",
         "doc:AGENTS.md#§1 Constraints"
@@ -37,9 +79,26 @@
     {
       "id": "ui",
       "title": "Display, layout and waterfall",
-      "files": ["main/mrrc_ui.c", "main/mrrc_ui.h", "components/bsp/**"],
-      "keywords": ["lvgl", "palette", "waterfall", "canvas", "trace", "font", "layout", "tick", "repaint"],
+      "files": [
+        "main/mrrc_ui.c",
+        "main/mrrc_ui.h",
+        "components/bsp/**"
+      ],
+      "keywords": [
+        "lvgl",
+        "palette",
+        "waterfall",
+        "canvas",
+        "trace",
+        "font",
+        "layout",
+        "tick",
+        "repaint"
+      ],
       "refs": [
+        "sdd:NFR-022",
+        "sdd:NFR-020",
+        "sdd:AD-005",
         "doc:docs/UI.md#2. Palette",
         "doc:docs/UI.md#1. Canvas and refresh",
         "doc:docs/UI.md#3. Vertical layout",
@@ -51,9 +110,27 @@
     {
       "id": "memory",
       "title": "Memory and CPU budget",
-      "files": ["main/app_main.c", "sdkconfig.defaults", "partitions.csv"],
-      "keywords": ["heap", "largest", "bss", "psram", "stack", "cpu", "idle", "fragment", "o2", "size"],
+      "files": [
+        "main/app_main.c",
+        "sdkconfig.defaults",
+        "partitions.csv"
+      ],
+      "keywords": [
+        "heap",
+        "largest",
+        "bss",
+        "psram",
+        "stack",
+        "cpu",
+        "idle",
+        "fragment",
+        "o2",
+        "size"
+      ],
       "refs": [
+        "sdd:AD-005",
+        "sdd:NFR-023",
+        "sdd:NFR-018",
         "doc:docs/design-v1.md#4. Memory budget",
         "doc:docs/optimization-notes.md#0. Baseline",
         "doc:docs/optimization-notes.md#15. Before and after",
@@ -63,9 +140,30 @@
     {
       "id": "provisioning",
       "title": "Provisioning and network selection",
-      "files": ["main/mrrc_cfg.c", "main/mrrc_cfg.h", "main/mrrc_prov.c", "main/mrrc_prov.h", "main/Kconfig.projbuild"],
-      "keywords": ["nvs", "config", "kconfig", "provision", "softap", "ap", "ssid", "wifi", "network", "switch", "health"],
+      "files": [
+        "main/mrrc_cfg.c",
+        "main/mrrc_cfg.h",
+        "main/mrrc_prov.c",
+        "main/mrrc_prov.h",
+        "main/Kconfig.projbuild"
+      ],
+      "keywords": [
+        "nvs",
+        "config",
+        "kconfig",
+        "provision",
+        "softap",
+        "ap",
+        "ssid",
+        "wifi",
+        "network",
+        "switch",
+        "health"
+      ],
       "refs": [
+        "sdd:NFR-030",
+        "sdd:AD-007",
+        "sdd:AD-006",
         "doc:docs/provisioning.md#Why NVS over Kconfig",
         "doc:docs/provisioning.md#Trigger conditions",
         "doc:docs/optimization-notes.md#23. Several networks",
@@ -75,9 +173,25 @@
     {
       "id": "build",
       "title": "Build, flash and release",
-      "files": ["tools/**", ".github/workflows/**", "CMakeLists.txt", "partitions.csv"],
-      "keywords": ["build", "flash", "ci", "release", "idf", "cmake", "actionlint", "verify", "archive"],
+      "files": [
+        "tools/**",
+        ".github/workflows/**",
+        "CMakeLists.txt",
+        "partitions.csv"
+      ],
+      "keywords": [
+        "build",
+        "flash",
+        "ci",
+        "release",
+        "idf",
+        "cmake",
+        "actionlint",
+        "verify",
+        "archive"
+      ],
       "refs": [
+        "sdd:NFR-029",
         "doc:AGENTS.md#§4 Build and flash",
         "doc:AGENTS.md#§2 The three IPv6 switches",
         "doc:docs/development/ci/CI-build-and-release.md#Release"
@@ -86,9 +200,25 @@
     {
       "id": "hardware",
       "title": "Board facts (codec, clock, no PSRAM, no APLL)",
-      "files": ["components/bsp/**", "docs/hardware-design/**"],
-      "keywords": ["es8311", "i2s", "mclk", "apll", "codec", "adc", "dac", "pins", "battery", "charge"],
+      "files": [
+        "components/bsp/**",
+        "docs/hardware-design/**"
+      ],
+      "keywords": [
+        "es8311",
+        "i2s",
+        "mclk",
+        "apll",
+        "codec",
+        "adc",
+        "dac",
+        "pins",
+        "battery",
+        "charge"
+      ],
       "refs": [
+        "sdd:NFR-027",
+        "sdd:AD-003",
         "doc:docs/design-v1.md#2. Hardware facts",
         "doc:docs/design-v1.md#3.1 Full duplex shares the clock",
         "doc:docs/design-v1.md#3.2 No APLL",
@@ -98,9 +228,22 @@
     {
       "id": "governance",
       "title": "Repository rules and this guardian",
-      "files": [".agents/skills/sdd-guardian/**"],
-      "keywords": ["guardian", "constraint", "rule", "block", "sdd", "hook", "selftest"],
+      "files": [
+        ".agents/skills/sdd-guardian/**"
+      ],
+      "keywords": [
+        "guardian",
+        "constraint",
+        "rule",
+        "block",
+        "sdd",
+        "hook",
+        "selftest"
+      ],
       "refs": [
+        "sdd:V5",
+        "sdd:V4",
+        "sdd:V1",
         "doc:docs/sdd-guardian.md#1. What a rule is",
         "doc:docs/sdd-guardian.md#3. Adding a rule",
         "doc:AGENTS.md#§6 Acceptance"

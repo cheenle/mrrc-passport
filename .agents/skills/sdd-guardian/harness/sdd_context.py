@@ -248,8 +248,75 @@ def format_hit(hit):
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
 
+# Chapter 00 §V5: the only statuses a requirement or decision may claim.
+SDD_STATUS_LADDER = ("proposed", "accepted", "implemented", "field-exercised",
+                     "hardware-verified", "historical")
+
+SDD_FILES = {
+    "ad": "SDD/08-architecture-decisions.md",
+    "nfr": "SDD/05-non-functional-requirements.md",
+    "method": "SDD/00-verification-discipline.md",
+    "tx": "SDD/15-transmit-safety-architecture.md",
+}
+
+
+def _slice_headings(path, start_pred):
+    """Return (heading, body) for the first heading matching start_pred."""
+    fp = PROJECT_ROOT / path
+    if not fp.is_file():
+        return None
+    lines = fp.read_text(encoding="utf-8").splitlines()
+    for i, line in enumerate(lines):
+        m = HEADING_RE.match(line)
+        if m and start_pred(m):
+            level = len(m.group(1))
+            end = len(lines)
+            for j in range(i + 1, len(lines)):
+                m2 = HEADING_RE.match(lines[j])
+                if m2 and len(m2.group(1)) <= level:
+                    end = j
+                    break
+            return (m.group(2).strip(), lines[i:min(end, i + BRIEF_REF_LINE_CAP)])
+    return None
+
+
+def _sdd_row(path, needle):
+    fp = PROJECT_ROOT / path
+    if not fp.is_file():
+        return None
+    for line in fp.read_text(encoding="utf-8").splitlines():
+        if line.startswith("|") and needle in line:
+            label = needle.strip("|* ").replace("**", "")
+            return (label, [line])
+    return None
+
+
+def resolve_sdd_ref(spec):
+    """sdd:AD-004 | sdd:NFR-005 | sdd:V4 | sdd:15.3 -> (path, heading, lines) or str."""
+    def wrap(path, got):
+        if got is None:
+            return "no %s in %s" % (spec, path)
+        return (path, got[0], got[1])
+
+    if spec.startswith("AD-"):
+        num = spec.split("-")[1]
+        return wrap(SDD_FILES["ad"], _slice_headings(
+            SDD_FILES["ad"], lambda m: m.group(2).startswith("AD-" + num)))
+    if spec.startswith("NFR-"):
+        return wrap(SDD_FILES["nfr"], _sdd_row(SDD_FILES["nfr"], "| %s |" % spec))
+    if len(spec) > 1 and spec[0] == "V" and spec[1:].isdigit():
+        return wrap(SDD_FILES["method"],
+                    _sdd_row(SDD_FILES["method"], "| **%s** |" % spec))
+    if spec[0].isdigit() and "." in spec:
+        return wrap(SDD_FILES["tx"], _slice_headings(
+            SDD_FILES["tx"], lambda m: m.group(2).startswith(spec + " ")))
+    return "unsupported sdd ref: %s" % spec
+
+
 def resolve_ref(ref):
-    """'doc:<path>#<heading substring>' -> (path, heading, body lines) or error str."""
+    """'doc:<path>#<heading>' or 'sdd:<ID>' -> (path, heading, body lines) or error str."""
+    if ref.startswith("sdd:"):
+        return resolve_sdd_ref(ref[4:])
     if not ref.startswith("doc:"):
         return "unsupported ref grammar: %s" % ref
     spec = ref[4:]

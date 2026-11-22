@@ -12,8 +12,9 @@
 检测器、严重级别，以及**产生它的那次事故**。同一份注册表驱动三处：动手前的 agent
 简报、能拒绝改动的 pre-tool 钩子、以及会红掉 PR 的 CI 门禁。
 
-这里没有一处是散文的副本。`index.json` 只存引用
-（`doc:docs/transport-tuning.md#6. Transmit`），调用时才从**当前文件**切出那一段，
+这里没有一处是散文的副本。`index.json` 只存引用——可以是文档段落
+（`doc:docs/transport-tuning.md#6. Transmit`），也可以是 SDD 条目
+（`sdd:AD-004`、`sdd:NFR-005`、`sdd:V4`、`sdd:15.3`）——调用时才从**当前文件**切出那一段，
 所以改文档不会让 guardian 引用一段已经不存在的文字；标题被改名时，guardian 自己的
 测试会先红。
 

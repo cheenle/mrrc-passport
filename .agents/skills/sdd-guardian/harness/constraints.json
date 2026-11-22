@@ -295,6 +295,20 @@
       ],
       "patterns": [],
       "message": "Same change, same commit: docs/optimization-notes.md for a performance number, docs/transport-tuning.md for anything on the audio path, docs/provisioning.md for settings, docs/UI.md for layout, CHANGELOG.md + CHANGELOG.zh_CN.md for user-visible behaviour. Measure first; a number without its condition is a rumour."
+    },
+    {
+      "id": "verification-discipline",
+      "title": "Every claim carries its measurement point, date and scenario",
+      "severity": "info",
+      "kind": "pattern",
+      "sdd_ref": "SDD/00-verification-discipline.md §0.2 (V1–V9)",
+      "scope": [
+        "SDD/**",
+        "docs/**",
+        "**/*.md"
+      ],
+      "patterns": [],
+      "message": "Nine rules, V1–V9: V1 measurement point + date + scenario; V3 negative results are recorded, not deleted; V4 corrections are in place and dated; V5 status is a ladder (proposed → accepted → implemented → field-exercised → hardware-verified); V6 a number without conditions is a rumour; V8 when two measurements disagree, find the differing condition before discarding either. A statement that cannot meet V1 is marked `proposed`, not written as fact."
     }
   ]
 }

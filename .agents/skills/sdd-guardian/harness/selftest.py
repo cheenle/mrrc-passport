@@ -43,6 +43,24 @@ def index():
     return ctx.load_index()
 
 
+def expand_nfr_refs(text):
+    """Expand the traceability notation: NFR-018-023, NFR-001, 002, 003."""
+    ids = set()
+    seq_re = re.compile(r"NFR-\d{3}(?:\s*[\u2013-]\s*\d{3})?"
+                        r"(?:,\s*\d{3}(?:\s*[\u2013-]\s*\d{3})?)*")
+    for seq in seq_re.findall(text):
+        for part in re.split(r",\s*", seq):
+            span = re.match(r"(?:NFR-)?(\d{3})\s*[\u2013-]\s*(\d{3})$", part.strip())
+            if span:
+                for i in range(int(span.group(1)), int(span.group(2)) + 1):
+                    ids.add("NFR-%03d" % i)
+                continue
+            one = re.match(r"(?:NFR-)?(\d{3})$", part.strip())
+            if one:
+                ids.add("NFR-%03d" % int(one.group(1)))
+    return ids
+
+
 def tracked_files():
     out = subprocess.run(["git", "ls-files"], cwd=str(ctx.PROJECT_ROOT),
                          capture_output=True, text=True)
@@ -198,12 +216,14 @@ class IndexTests(unittest.TestCase):
                             % (topic["id"], topic["files"]))
 
     def test_sliced_sections_are_non_trivial(self):
+        """A heading must bring its body; a table row is legitimately one line."""
         for topic in self.idx["topics"]:
             for ref in topic["refs"]:
                 got = ctx.resolve_ref(ref)
                 self.assertNotIsInstance(got, str, got)
                 path, heading, body = got
-                self.assertGreaterEqual(len(body), 3, "%s too short" % ref)
+                floor = 1 if ref.startswith(("sdd:NFR-", "sdd:V")) else 3
+                self.assertGreaterEqual(len(body), floor, "%s too short" % ref)
 
 
 class DetectorTests(unittest.TestCase):
@@ -284,6 +304,120 @@ class CatalogTests(unittest.TestCase):
         text = ctx.render_catalog()
         for rule in registry()["rules"]:
             self.assertIn("`%s`" % rule["id"], text)
+
+
+class SddStructureTests(unittest.TestCase):
+    """Chapter 00 made executable: the document's own form is a constraint.
+
+    These are the tests that catch the failure mode this whole chapter set was
+    written for — a claim that looks like design but cannot be verified, a
+    decision without its cost, a correction that quietly rewrote history, or a
+    chapter cited as if it existed.
+    """
+
+    def setUp(self):
+        self.sdd = ctx.PROJECT_ROOT / "SDD"
+        self.readme = (self.sdd / "README.md").read_text(encoding="utf-8")
+
+    def test_every_written_chapter_exists_and_every_file_is_listed(self):
+        written = set(re.findall(r"\[([0-9]{2}-[a-z0-9-]+\.md)\]", self.readme))
+        listed = {p.name for p in self.sdd.glob("[0-9][0-9]-*.md")
+                  if not p.name.endswith(".zh_CN.md")}
+        self.assertEqual(written, listed, "README index and SDD/ disagree")
+
+    def test_every_chapter_has_a_chinese_peer(self):
+        for path in self.sdd.glob("[0-9][0-9]-*.md"):
+            if path.name.endswith(".zh_CN.md"):
+                continue
+            peer = path.with_name(path.stem + ".zh_CN.md")
+            self.assertTrue(peer.is_file(), "missing %s" % peer.name)
+
+    def test_chapter_heading_number_matches_file_name(self):
+        for path in self.sdd.glob("[0-9][0-9]-*.md"):
+            if path.name.endswith(".zh_CN.md"):
+                continue
+            first = next((ln for ln in path.read_text(encoding="utf-8").splitlines()
+                          if ln.startswith("# ")), "")
+            self.assertTrue(first.startswith("# %s." % path.name[:2]),
+                            "%s: heading %r does not carry its number" % (path.name, first))
+
+    def test_pending_chapters_are_not_cited(self):
+        """Chapter 00 §V5: a pending chapter cannot be cited as if it existed."""
+        pending = set()
+        for line in self.readme.splitlines():
+            if line.startswith("|") and "| pending |" in line:
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                pending.add(cells[0])
+        self.assertTrue(pending, "no pending chapters found — update the test")
+        bodies = {
+            p.name: p.read_text(encoding="utf-8")
+            for p in self.sdd.glob("[0-9][0-9]-*.md") if not p.name.endswith(".zh_CN.md")
+        }
+        for name, text in bodies.items():
+            for num in pending:
+                for m in re.finditer(r"chapter [`']?(%s)\b" % num, text, re.I):
+                    line = text.count("\n", 0, m.start()) + 1
+                    self.fail("%s:%d cites pending chapter %s" % (name, line, num))
+
+    def test_ad_entries_have_the_required_parts(self):
+        text = (self.sdd / "08-architecture-decisions.md").read_text(encoding="utf-8")
+        blocks = re.split(r"^## (AD-[0-9]{3}):.*$", text, flags=re.M)
+        self.assertGreater(len(blocks), 3, "no AD entries parsed")
+        for i in range(1, len(blocks), 2):
+            ad, body = blocks[i], blocks[i + 1]
+            for part in ("**Problem.**", "**Decision.**", "**Consequences.**"):
+                self.assertIn(part, body, "%s is missing %s" % (ad, part))
+            self.assertIn("| Status |", body, "%s has no status row" % ad)
+            status = re.search(r"\| Status \| ([^|]+)\|", body).group(1).lower()
+            self.assertTrue(any(s in status for s in ctx.SDD_STATUS_LADDER),
+                            "%s: status %r is not on the ladder" % (ad, status))
+
+    def test_ad_numbers_are_unique_and_contiguous(self):
+        text = (self.sdd / "08-architecture-decisions.md").read_text(encoding="utf-8")
+        nums = [int(n) for n in re.findall(r"^## AD-([0-9]{3}):", text, re.M)]
+        self.assertEqual(nums, list(range(1, len(nums) + 1)),
+                         "AD numbers must be 001..N with no gaps or reuse")
+
+    def test_every_nfr_row_is_verifiable(self):
+        path = self.sdd / "05-non-functional-requirements.md"
+        body = path.read_text(encoding="utf-8").partition("## 5.7")[0]
+        rows = [ln for ln in body.splitlines()
+                if re.match(r"^\| NFR-[0-9]{3} \|", ln)]
+        self.assertGreaterEqual(len(rows), 20)
+        for row in rows:
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            self.assertEqual(len(cells), 6, "NFR row must have 6 columns: %s" % row[:40])
+            nfr, target, priority, verification, status = (
+                cells[0], cells[2], cells[3], cells[4], cells[5])
+            self.assertRegex(target, r"[0-9]",
+                             "%s: target %r has no number (chapter 00 §V6)" % (nfr, target))
+            self.assertTrue(verification, "%s: no verification method" % nfr)
+            self.assertIn(status, ctx.SDD_STATUS_LADDER,
+                          "%s: status %r is not on the ladder" % (nfr, status))
+            self.assertIn(priority, ("Critical", "High", "Medium", "Low"),
+                          "%s: priority %r" % (nfr, priority))
+
+    def test_every_nfr_is_traceable(self):
+        text = (self.sdd / "05-non-functional-requirements.md").read_text(encoding="utf-8")
+        main_part, _, trace = text.partition("## 5.7 Traceability")
+        self.assertTrue(trace, "chapter 05 has no traceability section")
+        declared = set(re.findall(r"\| (NFR-[0-9]{3}) \|", main_part))
+        traced = expand_nfr_refs(trace)
+        self.assertEqual(declared - traced, set(),
+                         "requirements with no decision/enforcement/evidence row")
+
+    def test_chapter_00_rules_are_numbered_and_complete(self):
+        text = (self.sdd / "00-verification-discipline.md").read_text(encoding="utf-8")
+        ids = re.findall(r"\| \*\*(V[0-9]+)\*\* \|", text)
+        self.assertEqual(ids, ["V%d" % i for i in range(1, 10)],
+                         "the rule table must be V1..V9 in order")
+
+    def test_index_refs_point_at_real_sdd_items(self):
+        idx = index()
+        for topic in idx["topics"]:
+            for ref in topic["refs"]:
+                self.assertNotIsInstance(ctx.resolve_ref(ref), str,
+                                         "%s: %s" % (topic["id"], ref))
 
 
 class NvsOwnershipTests(unittest.TestCase):
