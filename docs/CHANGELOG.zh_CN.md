@@ -10,6 +10,8 @@
 
 ## Unreleased
 
+## v1.3.0 - 2026-11-23
+
 - 发射不再把连接打掉。设备按键期间服务端仍在向这条 socket 写电台的 RX 音频——同一条 TCP
   上 30 KB/s 下行对 32 KB/s 上行——移动链路上行写阻塞一秒，WebSocket 客户端把它当致命
   错误重连，于是操作者看到"按着 PTT 却自己松开了"。现在持有 PTT 的 socket 不再收下行音频
@@ -33,6 +35,11 @@
   `taskLVGL` 56–61% → 43%，IDLE 7–14% → 28%。为定位问题新增了两个诊断接口（都在
   `CONFIG_MRRC_PROFILE` 后面）：`bsp_display_flush_stats()`（字节数/每秒几屏）与
   `bsp_display_flush_bands()`（同样的像素按 32 行分带）。
+- 设计记录随产品一起发布：`SDD/` 十三章（设备必须做到的可测数字、为什么这样做以及被否决
+  的备选方案、还有包含"没有修好什么"的事故账本），渲染在
+  https://www.vlsc.net/mrrc_modern/sdd-passport/ ，另有一页可打印的
+  <a href="https://www.vlsc.net/mrrc_modern/passport-field-card.html">现场速查卡</a>，
+  写着发射验收值与"症状→第一台仪器"对照表。卡上的数字由 CI 与设计记录核对，两者不会各说各话。
 
 ## v1.2.1 - 2026-11-21
 

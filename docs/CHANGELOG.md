@@ -12,6 +12,8 @@
 
 ## Unreleased
 
+## v1.3.0 - 2026-11-23
+
 - Transmitting no longer tears the connection down. The server kept writing the
   radio's RX audio to the terminal socket while it was keyed — 30 KB/s down
   against 32 KB/s up on one TCP — so on a mobile link the uplink write blocked for
@@ -76,6 +78,14 @@
   2% drops or 50 underruns/s triggers a rescan, because a hotspot can deliver that
   while `esp_wifi` still reports the link as up. Same train, AP changed from
   `cnham-MM` to an iPhone hotspot: drops +200/min → 0, frames written 1.9-26 → 44-47/s.
+- The design record is now published next to the product: thirteen chapters of
+  `SDD/` (what the device must do as measurable numbers, why it is built this way
+  with the rejected alternatives, and the incident ledger including what was *not*
+  fixed), rendered at
+  https://www.vlsc.net/mrrc_modern/sdd-passport/ , plus a printable one-page
+  <a href="https://www.vlsc.net/mrrc_modern/passport-field-card.html">field card</a>
+  with the transmit acceptance values and the symptom-to-instrument table. The
+  numbers on the card are checked against the record by CI, so the two cannot drift.
 
 ## v1.2.1 - 2026-11-21
 
