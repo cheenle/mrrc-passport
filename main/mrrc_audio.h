@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Ring capacity in bytes, so the once-a-minute diag line can print occupancy
+ * without reaching into the implementation.  Keep in step with AUD_RB_BYTES. */
+#define AUD_RB_BYTES_CONST 16384
+
 /* Connects /WSaudioRX and starts the decode+playback task.  Call after
  * bsp_audio_set_format() so the codec is already open at the shared rate. */
 /* Creates the Opus decoder and encoder and runs one dummy call through each,
@@ -35,6 +39,12 @@ uint32_t mrrc_audio_rebuffers(void);
 void mrrc_audio_drop_split(uint32_t *lock, uint32_t *full);
 /* Frames and samples written to I2S since boot (the consumer's real rate). */
 void mrrc_audio_written(uint32_t *frames, uint64_t *samples);
+/* Underruns, current/high-water ring occupancy, and the mute/TX state. */
+/* Stall recoveries: the stream was quiet for over a second and the queued audio
+ * was discarded instead of being replayed stale. */
+uint32_t mrrc_audio_stall_flushes(void);
+void mrrc_audio_state(uint32_t *underruns, size_t *used, size_t *used_max,
+                      bool *muted, bool *tx);
 
 /* Profiling: total frames played and the accumulated time spent in the audio
  * path.  dec_us is always 0 now that no decoder is linked in; the parameter is

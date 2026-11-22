@@ -41,6 +41,10 @@ static const char *TAG = "audio";
  * rate settled at 41/s, heard as steady stutter.  Doubling the ring costs 8 KB
  * of .bss and buys 0.5 s of slack; `largest` was 46 KB before the change, so
  * the PTT handshake (16 KB contiguous) still has room. */
+/* 16 KB = 0.51 s of 16 kHz PCM.  A 24 KB experiment changed nothing: with the
+ * diag line showing `ring(24396/24576)` the ring is permanently full, so the
+ * bottleneck is the playback side draining slower than the stream arrives, not
+ * the burst size.  Do not grow this until that is fixed. */
 #define AUD_RB_BYTES   16384        /* ~0.51 s of 16 kHz PCM */
 #define AUD_FRAME_MAX  1920         /* 60 ms @ 16 kHz mono */
 /* Playback used to start on the very first frame, so the ring sat near empty
@@ -49,6 +53,13 @@ static const char *TAG = "audio";
  * rebuild the cushion if the ring stays dry — 160 ms at 32 KB/s. */
 #define AUD_PREBUF_BYTES 5120       /* ~160 ms */
 #define AUD_REBUFFER_US  200000LL   /* dry for 200 ms -> buffer again */
+/* A mobile link (a phone hotspot on a train, say) stalls for seconds: measured
+ * 12% loss with RTT peaks of 3-10 s.  No feasible ring covers that, so do not
+ * try — when the stream goes quiet this long, the audio already queued is stale
+ * by definition.  Throw it away and start a fresh pre-buffer, so playback
+ * resumes near-live instead of replaying half a second of history and then
+ * fighting the recovery burst with a permanently full ring. */
+#define AUD_STALL_FLUSH_US 1000000LL
 /* The codec runs at 16 kHz, not 48 kHz.  Measured on this board: the ES8311
  * ADC delivers ~468 peak at 48 kHz and ~12708 at 16 kHz for the same speech —
  * the microphone path is effectively dead at 48 kHz (ai-passport's own demo
@@ -81,7 +92,9 @@ static uint32_t s_written;
 static uint64_t s_written_samples;
 static size_t   s_used_max;
 /* Pre-buffer state: false means "accumulating", true means "playing". */
-static bool     s_playing;
+static volatile bool s_playing;
+static int64_t  s_last_feed_us;
+static uint32_t s_flushes;   /* stall recoveries */
 static uint32_t s_rebuffers;
 static int64_t  s_dry_since;
 static volatile bool s_muted;
@@ -102,6 +115,26 @@ static void rb_put(const uint8_t *d, size_t n)
      * lock contention rather than overrun.  2 ms is 100x the hold time and far
      * below one frame period, so a retry cannot make the stream late. */
     if (xSemaphoreTake(s_rb_mtx, pdMS_TO_TICKS(2)) != pdTRUE) { s_drops++; s_drop_lock++; return; }
+    if (AUD_RB_BYTES - s_used < n + 2) {
+        /* Full.  Which end to sacrifice depends on why it is full.
+         *
+         * Steady state: drop the newest, so the stream stays continuous and we
+         * lose one 20 ms frame instead of tearing the buffer.
+         *
+         * Recovery: after a mobile-link stall the server hands over seconds of
+         * backlog at once.  Dropping the newest there keeps the *oldest* 16 KB
+         * and replays it, which is stale by half a second and leaves the ring
+         * permanently full — measured as `ring(15408/16384)` minute after minute
+         * while drops climbed.  Once the ring is nearly full, discard from the
+         * front instead so what survives is the freshest audio. */
+        if (s_used > (AUD_RB_BYTES * 3) / 4) {
+            while (s_used >= 2 && AUD_RB_BYTES - s_used < n + 2) {
+                const size_t len = (size_t)((s_rb[s_r] << 8) | s_rb[(s_r + 1) % AUD_RB_BYTES]);
+                s_r = (s_r + 2 + len) % AUD_RB_BYTES;
+                s_used -= len + 2;
+            }
+        }
+    }
     if (AUD_RB_BYTES - s_used < n + 2) {
         s_drops++;
         s_drop_full++;
@@ -255,6 +288,19 @@ void mrrc_audio_feed(const uint8_t *data, size_t len)
      *   0x00  48 kHz Int16 PCM  — the fallback when the server has no pcm16
      *   0x01  Opus              — not linked in; dropped on the floor
      */
+    const int64_t now_us = esp_timer_get_time();
+    if (s_last_feed_us && now_us - s_last_feed_us > AUD_STALL_FLUSH_US) {
+        /* Stream was dead for over a second: what is queued is history. */
+        if (s_rb_mtx && xSemaphoreTake(s_rb_mtx, pdMS_TO_TICKS(2)) == pdTRUE) {
+            s_r = s_w = s_used = 0;
+            xSemaphoreGive(s_rb_mtx);
+            s_flushes++;
+        }
+        s_playing = false;
+        s_dry_since = 0;
+    }
+    s_last_feed_us = now_us;
+
     if (s_muted) {
         /* Transmitting: the radio is not receiving, and anything queued now is
          * stale before the operator unkeys.  Dropping it here (rather than
@@ -305,6 +351,25 @@ void mrrc_audio_link_stats(uint32_t *rx_bytes, uint32_t *underruns,
 }
 
 uint32_t mrrc_audio_rebuffers(void) { return s_rebuffers; }
+
+uint32_t mrrc_audio_stall_flushes(void) { return s_flushes; }
+
+void mrrc_audio_state(uint32_t *underruns, size_t *used, size_t *used_max,
+                      bool *muted, bool *tx)
+{
+    if (underruns) *underruns = s_underruns;
+    if (muted)     *muted     = s_muted;
+    if (tx)        *tx        = mrrc_tx_active();
+    if (used || used_max) {
+        size_t u = 0;
+        if (s_rb_mtx && xSemaphoreTake(s_rb_mtx, pdMS_TO_TICKS(2)) == pdTRUE) {
+            u = s_used;
+            xSemaphoreGive(s_rb_mtx);
+        }
+        if (used)     *used     = u;
+        if (used_max) *used_max = s_used_max;
+    }
+}
 
 void mrrc_audio_written(uint32_t *frames, uint64_t *samples)
 {

@@ -821,3 +821,38 @@ fast. The remaining drops are therefore pure burst overruns: minutes with 0, the
 a spike of a few hundred when the network hands over a clump larger than the ring's
 slack (0.5 s ring minus the 160 ms pre-buffer). The lever for those is latency, not
 CPU, and they are not audible as continuous stutter.
+
+## 22. Surviving a mobile link (2026-11-22)
+
+Measured on a train, tethered to a phone: **6.5–12% packet loss, RTT peaks of
+6–10 s, 26–41 pings over one second in four minutes**. The firmware cannot buffer
+that — ten seconds of 32 KB/s audio is 320 KB, and the whole SRAM is 400 KB — so
+the goal is not continuity but *graceful* degradation. Two policies got there.
+
+**1. A stall means the queue is history.** If no audio arrives for a second
+(`AUD_STALL_FLUSH_US`), the frames already queued are stale by definition. Throw
+them away and start a fresh pre-buffer rather than replaying half a second of
+history and then fighting the recovery burst. Printed as `flush=` in the diag
+line; it fired 5–16 times per four minutes, matching the ping record.
+
+**2. Which end to drop depends on why the ring is full.** The ring used to drop
+the *newest* frame, which is right in steady state (one 20 ms frame lost, stream
+intact) and wrong during recovery: after a stall the server hands over seconds of
+backlog, and dropping the newest keeps the *oldest* 16 KB — stale audio, and the
+ring then sits at `15408/16384` minute after minute. Once the ring is over 75%
+full the oldest frames are discarded instead, so what survives is the freshest.
+
+Result on the same train link, seven minutes, 6.5% loss, 29 spikes over one second:
+
+| | before | after |
+|---|---:|---:|
+| drops (`full`) | +200/min | **0** |
+| `i2s` | 1.9–26 f/s | 26–47 f/s |
+| `flush` | — | 16 |
+
+Price: while recovering, the ring sits full, so playback is up to 0.5 s behind
+live. Trimming back to the 160 ms floor after a recovery would fix the latency at
+the cost of an audible skip; not done.
+
+What remains is underruns (`un`) climbing during the stalls themselves — the
+honest answer for a link that disappears for seconds.

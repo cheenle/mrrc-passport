@@ -37,6 +37,11 @@
   mutex with a zero timeout, so every overlap with the consumer's copy discarded a
   frame. A 2 ms timeout (100x the hold time, far below one frame period) leaves
   only burst overruns, which are now minutes apart instead of continuous.
+- Survive a mobile link (measured on a train: 6-12% loss, RTT peaks of 6-10 s).
+  A stall longer than a second now discards the queued audio and re-buffers
+  instead of replaying it stale, and when the ring passes 75% the oldest frames
+  are dropped rather than the newest, so a recovery burst leaves fresh audio
+  behind. On that link: drops +200/min → 0, `i2s` 1.9-26 → 26-47 frames/s.
 
 ## v1.2.1 - 2026-11-21
 
