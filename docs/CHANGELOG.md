@@ -42,6 +42,13 @@
   instead of replaying it stale, and when the ring passes 75% the oldest frames
   are dropped rather than the newest, so a recovery burst leaves fresh audio
   behind. On that link: drops +200/min → 0, `i2s` 1.9-26 → 26-47 frames/s.
+- Keep up to three Wi-Fi networks and choose between them: at boot the firmware
+  scans and connects to the strongest configured SSID it can see (falling back to
+  the first, so single-network setups are unchanged), moves on after three failed
+  connections, and switches on audio health alone — two consecutive minutes over
+  2% drops or 50 underruns/s triggers a rescan, because a hotspot can deliver that
+  while `esp_wifi` still reports the link as up. Same train, AP changed from
+  `cnham-MM` to an iPhone hotspot: drops +200/min → 0, frames written 1.9-26 → 44-47/s.
 
 ## v1.2.1 - 2026-11-21
 

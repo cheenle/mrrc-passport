@@ -28,8 +28,11 @@ rsync -a --delete \
 
 # sdkconfig is generated, so it is not synced, which also means a changed
 # Kconfig default never reaches the remote build.  Drop the stale file whenever
-# the defaults are newer than it.
-ssh "$MAC" "cd $REMOTE && [ sdkconfig -ot sdkconfig.defaults ] && rm -f sdkconfig sdkconfig.old || true" >/dev/null 2>&1
+# either defaults layer is newer than it — the local layer holds the credentials,
+# so forgetting it here silently built a firmware with the wrong networks.
+ssh "$MAC" "cd $REMOTE && { [ sdkconfig -ot sdkconfig.defaults ] || \
+    { [ -f sdkconfig.defaults.local ] && [ sdkconfig -ot sdkconfig.defaults.local ]; }; } && \
+    rm -f sdkconfig sdkconfig.old || true" >/dev/null 2>&1
 
 echo "== apply managed-component patches =="
 ssh "$MAC" "cd $REMOTE && ./tools/patch_ws_nodelay.sh; ./tools/patch_microopus.sh" || true

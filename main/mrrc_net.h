@@ -57,6 +57,10 @@ void mrrc_net_start(void);
 bool mrrc_net_up(void);
 /* Current AP signal in dBm, or 0 when there is no station connection. */
 int mrrc_net_rssi(void);
+/* Switch to another configured network because the current one is delivering an
+ * unusable audio stream (reason is only for the log). No-op when there is no
+ * alternative visible. */
+void mrrc_net_wifi_kick(const char *reason);
 /* Payload bytes received on /WSterminal (audio + spectrum), for the diag line. */
 uint32_t mrrc_net_ws_rx_bytes(void);
 /* Time (µs) and counts spent on each payload kind inside the WS event. */

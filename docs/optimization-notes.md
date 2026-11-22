@@ -856,3 +856,38 @@ the cost of an audible skip; not done.
 
 What remains is underruns (`un`) climbing during the stalls themselves — the
 honest answer for a link that disappears for seconds.
+
+## 23. Several networks, and switching on audio health (2026-11-22)
+
+ESP-IDF configures one AP per station interface, so a network list is an
+application concern. The firmware now holds up to three (SSID, password) pairs
+from Kconfig — the credentials stay in the gitignored `sdkconfig.defaults.local`
+— and at boot:
+
+1. scans once (~1–2 s, before the first connect),
+2. connects to the **strongest configured SSID that the scan can see**,
+3. falls back to the first entry when none is visible, so a single-network setup
+   behaves exactly as before,
+4. rescans and moves on after three consecutive connection failures, which is what
+   happens when the operator physically moves between sites.
+
+Separately, the link can be bad while `esp_wifi` never reports a disconnect: a
+phone hotspot stays associated through 10% loss and multi-second stalls. So the
+once-a-minute audio counters now decide too — two consecutive minutes with more
+than 2% frame drops or 50 underruns per second trigger `mrrc_net_wifi_kick()`,
+which rescans and moves to a different visible candidate (and does nothing when
+there is none).
+
+Measured on a train, same device and firmware, only the AP changed:
+
+| | `cnham-MM` | `iPhone` hotspot |
+|---|---:|---:|
+| frame drops | +200/min | **0** |
+| frames written to I2S | 1.9–26 /s | 44–47 /s |
+| ring occupancy | pinned full | drains back to 0 |
+| stall recoveries (`flush`) | — | ~1/min |
+
+Both are mobile links: `i2s` at 44–47 instead of 50 and `un` still climbing means
+second-long stalls remain, and no ring covers those. What changed is that the
+failure is now graceful — no drop storms, no stutter bursts from a permanently
+full ring.

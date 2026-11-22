@@ -8,6 +8,24 @@ menu "MRRC Terminal"
         string "Wi-Fi password"
         default ""
 
+    # 备用网络：开机扫描后在同一次序里挑信号最好的、扫得到的那个。
+    # 留空即忽略。密码与各自 SSID 一一对应。
+    config MRRC_WIFI_SSID2
+        string "Wi-Fi SSID (alternate 1)"
+        default ""
+
+    config MRRC_WIFI_PASSWORD2
+        string "Wi-Fi password (alternate 1)"
+        default ""
+
+    config MRRC_WIFI_SSID3
+        string "Wi-Fi SSID (alternate 2)"
+        default ""
+
+    config MRRC_WIFI_PASSWORD3
+        string "Wi-Fi password (alternate 2)"
+        default ""
+
     config MRRC_SERVER_HOST
         string "MRRC server host"
         default ""

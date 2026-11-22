@@ -648,18 +648,166 @@ static void dump_ipv6(const char *when)
                  (unsigned)v6[i].addr[2], (unsigned)v6[i].addr[3], v6[i].zone);
 }
 
+/* ── multiple networks ──────────────────────────────────────────────────
+ * ESP-IDF configures one AP per station interface, so a list is an application
+ * concern: scan once, connect to the strongest configured SSID that is present,
+ * and on repeated failures move to the next candidate instead of retrying a
+ * network that is not there.
+ *
+ * With only MRRC_WIFI_SSID set the behaviour is exactly what it was: one
+ * candidate, and the scan only decides whether it is visible. */
+#define WIFI_AP_MAX 3
+typedef struct { const char *ssid; const char *password; } ap_cred_t;
+
+static ap_cred_t s_ap[WIFI_AP_MAX];
+static size_t s_ap_count;
+static size_t s_ap_cur;              /* index being tried */
+static uint32_t s_disc_streak;       /* consecutive no-IP disconnects */
+static volatile bool s_switching;    /* a deliberate AP change is in flight */
+
+static void wifi_build_ap_list(void)
+{
+    const char *ssid[WIFI_AP_MAX] = { CONFIG_MRRC_WIFI_SSID, CONFIG_MRRC_WIFI_SSID2,
+                                      CONFIG_MRRC_WIFI_SSID3 };
+    const char *pass[WIFI_AP_MAX] = { CONFIG_MRRC_WIFI_PASSWORD, CONFIG_MRRC_WIFI_PASSWORD2,
+                                      CONFIG_MRRC_WIFI_PASSWORD3 };
+    s_ap_count = 0;
+    for (int i = 0; i < WIFI_AP_MAX; i++) {
+        if (ssid[i][0]) {
+            s_ap[s_ap_count].ssid = ssid[i];
+            s_ap[s_ap_count].password = pass[i];
+            s_ap_count++;
+        }
+    }
+    s_ap_cur = 0;
+}
+
+/* Scan and return the index of the strongest configured SSID that is present,
+ * or 0 when nothing matches (so a single-network setup still tries its only
+ * entry, and a hidden SSID still gets a chance). Blocking: ~1-2 s, once. */
+static size_t wifi_pick_ap(void)
+{
+    if (s_ap_count <= 1) return 0;
+
+    wifi_scan_config_t sc = { .show_hidden = true };
+    if (esp_wifi_scan_start(&sc, true) != ESP_OK) {
+        ESP_LOGW(TAG, "scan failed; falling back to \"%s\"", s_ap[0].ssid);
+        return 0;
+    }
+
+    uint16_t n = 0;
+    esp_wifi_scan_get_ap_num(&n);
+    if (n == 0) return 0;
+    if (n > 24) n = 24;
+    wifi_ap_record_t rec[24];
+    if (esp_wifi_scan_get_ap_records(&n, rec) != ESP_OK) return 0;
+
+    int best = -1, best_rssi = -127;
+    for (int i = 0; i < n; i++) {
+        for (size_t k = 0; k < s_ap_count; k++) {
+            if (strcmp((const char *)rec[i].ssid, s_ap[k].ssid) != 0) continue;
+            if (rec[i].rssi > best_rssi) { best_rssi = rec[i].rssi; best = (int)k; }
+        }
+    }
+    if (best < 0) {
+        ESP_LOGW(TAG, "none of %u configured SSIDs visible; trying \"%s\"",
+                 (unsigned)s_ap_count, s_ap[0].ssid);
+        return 0;
+    }
+    ESP_LOGI(TAG, "picked \"%s\" (rssi %d) of %u configured",
+             s_ap[best].ssid, best_rssi, (unsigned)s_ap_count);
+    return (size_t)best;
+}
+
+/* Strongest visible candidate that is NOT the one we are on. Returns `skip`
+ * when there is nothing better to move to. */
+static size_t wifi_pick_ap_except(size_t skip)
+{
+    if (s_ap_count < 2) return skip;
+    wifi_scan_config_t sc = { .show_hidden = true };
+    if (esp_wifi_scan_start(&sc, true) != ESP_OK) return skip;
+    uint16_t n = 0;
+    esp_wifi_scan_get_ap_num(&n);
+    if (n == 0) return skip;
+    if (n > 24) n = 24;
+    wifi_ap_record_t rec[24];
+    if (esp_wifi_scan_get_ap_records(&n, rec) != ESP_OK) return skip;
+
+    int best = -1, best_rssi = -127;
+    for (int i = 0; i < n; i++) {
+        for (size_t k = 0; k < s_ap_count; k++) {
+            if (k == skip) continue;
+            if (strcmp((const char *)rec[i].ssid, s_ap[k].ssid) != 0) continue;
+            if (rec[i].rssi > best_rssi) { best_rssi = rec[i].rssi; best = (int)k; }
+        }
+    }
+    return best < 0 ? skip : (size_t)best;
+}
+
+static void wifi_apply_ap(size_t idx)
+{
+    s_ap_cur = idx;
+    wifi_config_t cfg = { 0 };
+    snprintf((char *)cfg.sta.ssid, sizeof(cfg.sta.ssid), "%s", s_ap[idx].ssid);
+    snprintf((char *)cfg.sta.password, sizeof(cfg.sta.password), "%s", s_ap[idx].password);
+    cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    ESP_LOGI(TAG, "connecting to \"%s\" (%u/%u)", s_ap[idx].ssid,
+             (unsigned)(idx + 1), (unsigned)s_ap_count);
+}
+
+/* Called when the *audio* says the link is unusable, not when the AP vanished.
+ * A hotspot can stay associated while delivering 10% loss and multi-second
+ * stalls, which `esp_wifi` never reports as a disconnect. */
+void mrrc_net_wifi_kick(const char *reason)
+{
+    if (s_ap_count < 2) return;
+    const size_t nxt = wifi_pick_ap_except(s_ap_cur);
+    if (nxt == s_ap_cur) {
+        ESP_LOGW(TAG, "wifi kick (%s): no other configured SSID visible, staying", reason);
+        return;
+    }
+    ESP_LOGW(TAG, "wifi kick (%s): \"%s\" -> \"%s\"", reason,
+             s_ap[s_ap_cur].ssid, s_ap[nxt].ssid);
+    s_switching = true;
+    s_disc_streak = 0;
+    wifi_apply_ap(nxt);
+    esp_wifi_disconnect();
+    esp_wifi_connect();
+}
+
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        /* Nothing: with several candidate networks the station must scan and pick
+         * before it connects, so wifi_up() drives the first connect itself. */
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_ctrl_up = false;
+        if (s_switching) {
+            s_switching = false;
+            s_disc_streak = 0;
+            esp_wifi_connect();
+            return;
+        }
+        s_disc_streak++;
+        if (s_ap_count > 1 && s_disc_streak >= 3) {
+            /* This network is not coming back — the operator moved, or the AP
+             * went away. Rescan rather than retrying it forever. */
+            const uint32_t tries = s_disc_streak;
+            s_disc_streak = 0;
+            ESP_LOGW(TAG, "wifi down (%u tries on \"%s\"); rescanning",
+                     (unsigned)tries, s_ap[s_ap_cur].ssid);
+            wifi_apply_ap(wifi_pick_ap());
+            esp_wifi_connect();
+            return;
+        }
         ESP_LOGW(TAG, "wifi down, reconnecting");
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *ip = (const ip_event_got_ip_t *)data;
-        ESP_LOGI(TAG, "ip " IPSTR, IP2STR(&ip->ip_info.ip));
+        s_disc_streak = 0;
+        ESP_LOGI(TAG, "ip " IPSTR " on \"%s\"", IP2STR(&ip->ip_info.ip), s_ap[s_ap_cur].ssid);
 #if CONFIG_LWIP_IPV6
         /* The interface must be UP before a link-local address can be
          * derived; calling this at create time silently does nothing.
@@ -691,14 +839,14 @@ static bool wifi_up(void)
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
 
-    wifi_config_t cfg = { 0 };
-    snprintf((char *)cfg.sta.ssid, sizeof(cfg.sta.ssid), "%s", CONFIG_MRRC_WIFI_SSID);
-    snprintf((char *)cfg.sta.password, sizeof(cfg.sta.password), "%s", CONFIG_MRRC_WIFI_PASSWORD);
-    cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_build_ap_list();
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
+    /* The scan needs the driver running, and the station does not auto-connect
+     * until esp_wifi_connect(), so pick before asking to connect. */
+    wifi_apply_ap(wifi_pick_ap());
+    ESP_ERROR_CHECK(esp_wifi_connect());
     /* A talk terminal cannot tolerate modem sleep: it delays inbound audio by
      * 100 ms+ and bursts the downlink.  Cost is idle current. */
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
