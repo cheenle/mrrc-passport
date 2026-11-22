@@ -438,7 +438,7 @@ def cmd_doc(args):
         print("usage: doc <doc:path#heading | rule-id | term>", file=sys.stderr)
         return 1
     term = args[0]
-    if term.startswith("doc:"):
+    if term.startswith(("doc:", "sdd:")):
         got = resolve_ref(term)
         if isinstance(got, str):
             print(got, file=sys.stderr)

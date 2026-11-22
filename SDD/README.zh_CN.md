@@ -28,16 +28,16 @@
 | --- | --- | --- | --- | --- |
 | 00 | 校验纪律（本地增补） | — | [00-verification-discipline.md](00-verification-discipline.md) | 已写 |
 | 01 | Executive Summary | — | — | 待写 |
-| 03 | Project Definition（成功判据） | ENG 343 | — | 待写 |
+| 03 | 项目定义（成功判据） | ENG 343 | [03-project-definition.md](03-project-definition.md) | 已写 |
 | 04 | System Context | APP 011 | — | 待写 |
 | 05 | Non-Functional Requirements | ART 0507 | [05-non-functional-requirements.md](05-non-functional-requirements.md) | 已写 |
-| 06 | Use Case Model | ART 0508 | — | 待写 |
+| 06 | 用例模型 | ART 0508 | [06-use-case-model.md](06-use-case-model.md) | 已写 |
 | 08 | Architecture Decisions | ART 0513 | [08-architecture-decisions.md](08-architecture-decisions.md) | 已写 |
-| 09 | Architecture Overview | ART 0512 | — | 待写 |
-| 11 | Component Model | ART 0515 | — | 待写 |
+| 09 | 架构总览 | ART 0512 | [09-architecture-overview.md](09-architecture-overview.md) | 已写 |
+| 11 | 组件模型 | ART 0515 | [11-component-model.md](11-component-model.md) | 已写 |
 | 12 | Operational Model | ART 0522 | — | 待写 |
-| 13 | Feasibility Assessment | ART 0530 | — | 待写 |
-| 14 | Version History | — | — | 待写 |
+| 13 | 可行性评估 | ART 0530 | [13-feasibility-assessment.md](13-feasibility-assessment.md) | 已写 |
+| 14 | 版本历史 | — | [14-version-history.md](14-version-history.md) | 已写 |
 | 15 | Transmit Safety Architecture | ART 0535 | [15-transmit-safety-architecture.md](15-transmit-safety-architecture.md) | 已写 |
 
 `待写` 的章节既不是占位符，也不得被当成"已有"来引用：那里的知识目前仍住在下面列出的
@@ -66,7 +66,7 @@
 | 属性 | 值 |
 | --- | --- |
 | 文档 ID | SDD-MRRC-PASSPORT-2026-001 |
-| SDD 版本 | V0.1（第一批：第 00、05、08、15 章） |
+| SDD 版本 | V0.2（第 00、03、05、06、08、09、11、13、14、15 章） |
 | 基线日期 | 2026-11-23 |
 | 硬件 | FoloToy AI Passport：ESP32-C3 rev v1.1，160 MHz 单核，400 KB SRAM，无 PSRAM，8 MB flash，240×320 ST7789，ES8311 编解码器 |
 | 验证单元 | MAC `98:c3:77:f5:4b:2c`，`/dev/ttyACM0` |
@@ -75,8 +75,8 @@
 | 音频 | PCM16 单声道 16 kHz，20 ms 一帧，上行单帧含 tag 共 641 B |
 | 传输 | 仅 `/WSterminal`（文本控制、`0x00` RX、`0x01` TX、`0x02` 频谱） |
 | 稳态实测 | `free` 57–59 KB，`largest` 38–48 KB，`taskLVGL` 28–30%，`IDLE` 42–45%，`i2s` 50.0 帧/秒，`drop=0` |
-| 已成章 | 00、05、08、15 |
-| 待写 | 01、03、04、06、09、11、12、13、14 |
+| 已成章 | 00、03、05、06、08、09、11、13、14、15 |
+| 待写 | 01、04、12 |
 
 ## 阅读顺序
 

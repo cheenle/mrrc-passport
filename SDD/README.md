@@ -31,16 +31,16 @@ chapter in this document and it governs how all the others may be written.
 | --- | --- | --- | --- | --- |
 | 00 | Verification Discipline (local amendment) | — | [00-verification-discipline.md](00-verification-discipline.md) | written |
 | 01 | Executive Summary | — | — | pending |
-| 03 | Project Definition (success criteria) | ENG 343 | — | pending |
+| 03 | Project Definition (success criteria) | ENG 343 | [03-project-definition.md](03-project-definition.md) | written |
 | 04 | System Context | APP 011 | — | pending |
 | 05 | Non-Functional Requirements | ART 0507 | [05-non-functional-requirements.md](05-non-functional-requirements.md) | written |
-| 06 | Use Case Model | ART 0508 | — | pending |
+| 06 | Use Case Model | ART 0508 | [06-use-case-model.md](06-use-case-model.md) | written |
 | 08 | Architecture Decisions | ART 0513 | [08-architecture-decisions.md](08-architecture-decisions.md) | written |
-| 09 | Architecture Overview | ART 0512 | — | pending |
-| 11 | Component Model | ART 0515 | — | pending |
+| 09 | Architecture Overview | ART 0512 | [09-architecture-overview.md](09-architecture-overview.md) | written |
+| 11 | Component Model | ART 0515 | [11-component-model.md](11-component-model.md) | written |
 | 12 | Operational Model | ART 0522 | — | pending |
-| 13 | Feasibility Assessment | ART 0530 | — | pending |
-| 14 | Version History | — | — | pending |
+| 13 | Feasibility Assessment | ART 0530 | [13-feasibility-assessment.md](13-feasibility-assessment.md) | written |
+| 14 | Version History | — | [14-version-history.md](14-version-history.md) | written |
 | 15 | Transmit Safety Architecture | ART 0535 | [15-transmit-safety-architecture.md](15-transmit-safety-architecture.md) | written |
 
 A `pending` chapter is not a stub and must not be cited as if it existed: the
@@ -73,7 +73,7 @@ named in `08` and the server is cited as the owner.
 | Attribute | Value |
 | --- | --- |
 | Document ID | SDD-MRRC-PASSPORT-2026-001 |
-| SDD Version | V0.1 (first batch: chapters 00, 05, 08, 15) |
+| SDD Version | V0.2 (chapters 00, 03, 05, 06, 08, 09, 11, 13, 14, 15) |
 | Baseline Date | 2026-11-23 |
 | Hardware | FoloToy AI Passport: ESP32-C3 rev v1.1, 160 MHz single core, 400 KB SRAM, no PSRAM, 8 MB flash, 240×320 ST7789, ES8311 codec |
 | Verified unit | MAC `98:c3:77:f5:4b:2c`, `/dev/ttyACM0` |
@@ -82,8 +82,8 @@ named in `08` and the server is cited as the owner.
 | Audio | PCM16 mono 16 kHz, 20 ms frames, 641 B per uplink frame including tag |
 | Transports | `/WSterminal` only (control text, `0x00` RX, `0x01` TX, `0x02` spectrum) |
 | Steady state (measured) | `free` 57–59 KB, `largest` 38–48 KB, `taskLVGL` 28–30%, `IDLE` 42–45%, `i2s` 50.0 frames/s, `drop=0` |
-| Chapters written | 00, 05, 08, 15 |
-| Chapters pending | 01, 03, 04, 06, 09, 11, 12, 13, 14 |
+| Chapters written | 00, 03, 05, 06, 08, 09, 11, 13, 14, 15 |
+| Chapters pending | 01, 04, 12 |
 
 ## Reading order
 

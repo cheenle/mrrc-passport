@@ -412,6 +412,61 @@ class SddStructureTests(unittest.TestCase):
         self.assertEqual(ids, ["V%d" % i for i in range(1, 10)],
                          "the rule table must be V1..V9 in order")
 
+    def test_success_criteria_are_checkable(self):
+        text = (self.sdd / "03-project-definition.md").read_text(encoding="utf-8")
+        rows = [ln for ln in text.splitlines() if re.match(r"^\| SC[0-9]+ \|", ln)]
+        self.assertGreaterEqual(len(rows), 8, "too few success criteria")
+        ids = []
+        for row in rows:
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            self.assertEqual(len(cells), 3, "SC row must be | ID | criterion | verification |")
+            ids.append(int(cells[0][2:]))
+            self.assertTrue(cells[2], "%s: no verification" % cells[0])
+        self.assertEqual(ids, list(range(1, len(ids) + 1)), "SC ids must be 1..N")
+
+    def test_use_cases_carry_their_flow(self):
+        text = (self.sdd / "06-use-case-model.md").read_text(encoding="utf-8")
+        blocks = re.split(r"^### (UC-[0-9]{3}):.*$", text, flags=re.M)
+        self.assertGreater(len(blocks), 5, "no use cases parsed")
+        for i in range(1, len(blocks), 2):
+            uc, body = blocks[i], blocks[i + 1]
+            for field in ("Goal", "Preconditions", "Basic Flow", "Exceptions"):
+                self.assertIn("| %s |" % field, body, "%s is missing %s" % (uc, field))
+
+    def test_risk_assumption_issue_registers_are_numbered(self):
+        text = (self.sdd / "13-feasibility-assessment.md").read_text(encoding="utf-8")
+        for prefix, minimum in (("R", 4), ("A", 4), ("I", 4)):
+            ids = [int(m) for m in re.findall(r"^\| %s([0-9]+) \|" % prefix, text, re.M)]
+            self.assertGreaterEqual(len(ids), minimum, "register %s too short" % prefix)
+            self.assertEqual(ids, list(range(1, len(ids) + 1)),
+                             "register %s must be %s1..N in order" % (prefix, prefix))
+
+    def test_version_history_is_an_evidence_ledger(self):
+        """Newest first, four columns, and every row carries numbers and a boundary."""
+        text = (self.sdd / "14-version-history.md").read_text(encoding="utf-8")
+        rows = [ln for ln in text.splitlines()
+                if re.match(r"^\| (SDD V|20[0-9]{2}-)", ln)]
+        self.assertGreaterEqual(len(rows), 6, "ledger too short")
+        dates = []
+        for row in rows:
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            self.assertEqual(len(cells), 4, "ledger row must have 4 columns")
+            self.assertRegex(cells[1], r"^20[0-9]{2}-[0-9]{2}-[0-9]{2}", "bad date")
+            dates.append(cells[1][:10])
+            body = cells[3]
+            self.assertRegex(body, r"[0-9]", "row has no measurement: %s" % cells[0])
+            self.assertTrue(any(k in body for k in ("Boundary", "边界")),
+                            "row %s does not say what was not done" % cells[0])
+        self.assertEqual(dates, sorted(dates, reverse=True), "ledger must be newest first")
+
+    def test_component_model_names_real_files(self):
+        text = (self.sdd / "11-component-model.md").read_text(encoding="utf-8")
+        named = set(re.findall(r"`((?:main|components)/[A-Za-z0-9_./-]+)`", text))
+        self.assertGreater(len(named), 5)
+        for ref in named:
+            path = ctx.PROJECT_ROOT / ref.rstrip("/")
+            self.assertTrue(path.exists(), "chapter 11 names a missing path: %s" % ref)
+
     def test_index_refs_point_at_real_sdd_items(self):
         idx = index()
         for topic in idx["topics"]:
