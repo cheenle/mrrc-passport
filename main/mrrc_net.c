@@ -57,6 +57,12 @@ static volatile bool s_tx_busy;
  * the device's receive ceiling (both numbers drop together) or the server
  * sending less audio than it sends spectrum. */
 static uint32_t s_ws_rx_bytes;
+
+/* Where the websocket task's CPU goes.  The three payload kinds it handles cost
+ * wildly different amounts: audio and spectrum are memcpys, control JSON goes
+ * through cJSON's allocator.  Split them so tuning is not guesswork. */
+static uint32_t s_us_audio, s_us_spec, s_us_json;
+static uint32_t s_n_audio, s_n_spec, s_n_json;
 #define WS_TASK_STACK  6144
 #define NET_TASK_STACK 6144
 #define TOKEN_MAX      256
@@ -284,6 +290,17 @@ static void handle_ctrl_text(const char *payload, int len)
 
 uint32_t mrrc_net_ws_rx_bytes(void) { return s_ws_rx_bytes; }
 
+void mrrc_net_ws_cost(uint32_t *us_audio, uint32_t *us_spec, uint32_t *us_json,
+                      uint32_t *n_audio, uint32_t *n_spec, uint32_t *n_json)
+{
+    if (us_audio) *us_audio = s_us_audio;
+    if (us_spec)  *us_spec  = s_us_spec;
+    if (us_json)  *us_json  = s_us_json;
+    if (n_audio)  *n_audio  = s_n_audio;
+    if (n_spec)   *n_spec   = s_n_spec;
+    if (n_json)   *n_json   = s_n_json;
+}
+
 static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg; (void)base;
@@ -344,6 +361,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
              * coalesced send can exceed the 852-byte scope frame, so a real
              * audio packet would have been handed to the spectrum parser. */
             const uint8_t chan = ((const uint8_t *)ev->data_ptr)[0];
+            const int64_t t_ws = esp_timer_get_time();
             if (chan == 0x02) {
                 /* Half duplex: drop scope while keyed.
                  *
@@ -355,11 +373,15 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
                 if (s_tx_busy) break;
                 mrrc_ui_spectrum((const uint8_t *)ev->data_ptr + 2,
                                  (size_t)ev->data_len - 2);
+                s_us_spec += (uint32_t)(esp_timer_get_time() - t_ws);
+                s_n_spec++;
             } else if (chan == 0x00) {
                 /* Skip the channel byte: mrrc_audio_feed works from the codec
                  * tag onward. */
                 mrrc_audio_feed((const uint8_t *)ev->data_ptr + 1,
                                 (size_t)ev->data_len - 1);
+                s_us_audio += (uint32_t)(esp_timer_get_time() - t_ws);
+                s_n_audio++;
             }
             break;
         }
@@ -372,7 +394,10 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         memcpy(s_acc + ev->payload_offset, ev->data_ptr, (size_t)ev->data_len);
         if (ev->payload_offset + ev->data_len < ev->payload_len) break;  /* more to come */
         s_acc_len = (size_t)ev->payload_len;
+        const int64_t t_json = esp_timer_get_time();
         handle_ctrl_text(s_acc, (int)s_acc_len);
+        s_us_json += (uint32_t)(esp_timer_get_time() - t_json);
+        s_n_json++;
         break;
     }
     case WEBSOCKET_EVENT_ERROR:

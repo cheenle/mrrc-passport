@@ -25,6 +25,10 @@
   quarter of the flushed area — LVGL pays per anti-aliased segment, not per pixel.
   `taskLVGL` 42% → 28–30%, IDLE 29% → 42–45%, with the same line weight and the
   same repaint volume.
+- Instrument the WebSocket handler per payload kind: audio 70 µs per message,
+  spectrum 53 µs, control JSON 897 µs — our handler is ~1.1% of the CPU, and the
+  rest of `websocket_task`'s 15% is TLS and frame reassembly inside
+  `esp_websocket_client`.
 
 ## v1.2.1 - 2026-11-21
 

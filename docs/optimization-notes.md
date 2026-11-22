@@ -727,3 +727,32 @@ It does not work. When one row arrives and the picture scrolls, *every* visible
 row changes content, so LVGL must repaint the whole band no matter how the buffer
 is stored — the cost is in the redraw, not the memmove. The waterfall's whole
 share is 4–5 points (36–39% with it frozen), fifth of the trace's.
+
+## 19. Where the network CPU goes (2026-11-22)
+
+Once the trace was cheap, `websocket_task` at 14–15% became the second largest
+consumer. Rather than guess, the three payload kinds are now timed separately
+inside the event handler (`mrrc_net_ws_cost()`, behind `CONFIG_MRRC_PROFILE`):
+
+| Payload | Per message | Messages/min | CPU share |
+|---|---:|---:|---:|
+| audio (642 B) | 70 µs | 2985 | 0.35% |
+| spectrum (1701 B) | 53 µs | 642 | 0.06% |
+| control JSON | 897 µs | 437 | 0.65% |
+| **our handler, total** | | | **≈1.1%** |
+
+So almost none of that 15% is ours: the remaining ~14% is inside
+`esp_websocket_client` — TLS record decryption, frame reassembly, socket reads.
+Reducing it would mean replacing the client or changing the protocol, which is not
+worth it for this much.
+
+Two observations worth keeping:
+
+- **Control JSON is expensive per byte.** 437 messages a minute at 897 µs each is
+  0.65% CPU from ~1 KB/s of payload, because cJSON allocates a node per key. It is
+  also the main source of heap fragmentation (a 5.5 KB `fullState` allocated and
+  freed whole, repeatedly — §4.3/§13). Parsing only the fields the UI shows would
+  cut both; it was not done here.
+- **Audio costs almost nothing per message** (70 µs for 642 B including the ring
+  copy), so PCM16 at 50 messages/s is not what makes the network task busy. TLS at
+  49 KB/s is.

@@ -486,6 +486,19 @@ void app_main(void)
                 }
             }
             p_fb = fb; p_fc = fc;
+            {
+                static uint32_t pa, ps, pj, na, ns, nj;
+                uint32_t ca, cs, cj, qa, qs, qj;
+                mrrc_net_ws_cost(&ca, &cs, &cj, &qa, &qs, &qj);
+                ESP_LOGI(TAG, "ws cost/msg: audio %.0f us (%u)  spec %.0f us (%u)  json %.0f us (%u)",
+                         (double)(ca - pa) / (double)((qa - na) ? (qa - na) : 1),
+                         (unsigned)(qa - na),
+                         (double)(cs - ps) / (double)((qs - ns) ? (qs - ns) : 1),
+                         (unsigned)(qs - ns),
+                         (double)(cj - pj) / (double)((qj - nj) ? (qj - nj) : 1),
+                         (unsigned)(qj - nj));
+                pa = ca; ps = cs; pj = cj; na = qa; ns = qs; nj = qj;
+            }
             ESP_LOGI(TAG, "ws: total=%.1f KB/s (audio above is a subset)",
                      (double)(wrx - p_wrx) / dt / 1024.0);
             ESP_LOGI(TAG, "txlink: send_max=%u us slow=%u loop_max=%u us stalls=%u",

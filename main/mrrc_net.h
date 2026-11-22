@@ -59,6 +59,9 @@ bool mrrc_net_up(void);
 int mrrc_net_rssi(void);
 /* Payload bytes received on /WSterminal (audio + spectrum), for the diag line. */
 uint32_t mrrc_net_ws_rx_bytes(void);
+/* Time (µs) and counts spent on each payload kind inside the WS event. */
+void mrrc_net_ws_cost(uint32_t *us_audio, uint32_t *us_spec, uint32_t *us_json,
+                      uint32_t *n_audio, uint32_t *n_spec, uint32_t *n_json);
 
 /* Control writes (server-side: {"type":"set","field":...,"value":...}). */
 void mrrc_net_set_freq(int32_t hz);
