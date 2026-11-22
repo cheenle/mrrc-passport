@@ -16,6 +16,7 @@ on:
       - main
     paths:
       - ".github/release-title.json"
+      - ".github/workflows/release-title.yml"
   workflow_dispatch:
 
 permissions:
@@ -46,15 +47,46 @@ jobs:
 
       - name: Apply
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${{ steps.want.outputs.tag }}"
           title="${{ steps.want.outputs.title }}"
-          current="$(gh api "repos/${{ github.repository }}/releases/tags/$tag" --jq .name)"
+          api="https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag"
+          auth="Authorization: Bearer $TOKEN"
+          accept="Accept: application/vnd.github+json"
+
+          if [ -z "$TOKEN" ]; then
+            echo "::error::GITHUB_TOKEN is empty — check the workflow permissions block"
+            exit 1
+          fi
+
+          # Read the current title. Print the body on failure instead of a bare
+          # exit code: without a token on the maintainer's machine this log is
+          # the only diagnostics anyone gets.
+          body="$(mktemp)"
+          code="$(curl -sS -o "$body" -w '%{http_code}' -H "$auth" -H "$accept" "$api")"
+          if [ "$code" != "200" ]; then
+            echo "::error::GET $api -> HTTP $code"
+            cat "$body"
+            exit 1
+          fi
+          current="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("name") or "")' "$body")"
+
           if [ "$current" = "$title" ]; then
             echo "already \"$title\" — nothing to do"
             exit 0
           fi
-          gh api -X PATCH "repos/${{ github.repository }}/releases/tags/$tag" \
-            -f name="$title" > /dev/null
+
+          patch="$(mktemp)"
+          code="$(curl -sS -o "$patch" -w '%{http_code}' -X PATCH \
+            -H "$auth" -H "$accept" \
+            -d "$(python3 -c 'import json,sys;print(json.dumps({"name": sys.argv[1]}))' "$title")" \
+            "$api")"
+          if [ "$code" != "200" ]; then
+            echo "::error::PATCH $api -> HTTP $code"
+            cat "$patch"
+            echo "If this is 403, the repository's workflow permissions are read-only:"
+            echo "Settings -> Actions -> General -> Workflow permissions -> Read and write."
+            exit 1
+          fi
           echo "renamed \"$current\" -> \"$title\" ($tag)"
