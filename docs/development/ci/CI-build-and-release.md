@@ -97,8 +97,11 @@ together:
 git tag -a v1.4.0 -m "Mobile Link v1.4.0" && git push origin v1.4.0
 ```
 
-A lightweight tag keeps the bare tag name. If a title still needs fixing, edit
-`.github/release-title.json` and push — `.github/workflows/release-title.yml`
-applies it with the runner's token, so no API token is needed on the machine that
-publishes the change. (The old convention — rename it in the web UI — is what this
-replaces: manual steps after a release are the ones that get skipped.)
+A lightweight tag keeps the bare tag name. Nothing is renamed by hand afterwards,
+and no API token is needed to publish the title — it is part of the tag.
+
+If a title is wrong, it is wrong in the tag: re-annotate the tag on the intended
+commit and push it again (`git tag -f -a …`), and the release is updated in place
+because `action-gh-release` matches by tag. That is a deliberate last resort:
+moving a published tag is only acceptable while it still points at the release you
+meant to publish.

@@ -94,7 +94,10 @@ tag 触发的 Release 只有在合并固件与它的 Release 说明一起发布�
 git tag -a v1.4.0 -m "Mobile Link v1.4.0" && git push origin v1.4.0
 ```
 
-轻量 tag 则沿用 tag 名。若标题仍要修，改 `.github/release-title.json` 并推送——
-`.github/workflows/release-title.yml` 会用 runner 的 token 应用它，因此发布这台机器上
-不需要任何 API token。（被它取代的旧惯例是"发布后去网页上改标题"：发布之后的手动步骤，
-正是最容易被跳过的那一步。）
+轻量 tag 则沿用 tag 名。发布之后不需要再手动改标题，也不需要任何 API token——
+标题是 tag 的一部分。
+
+如果标题写错了，那是 tag 写错了：在目标提交上重新打注释 tag 再推一次
+（`git tag -f -a …`），release 会就地更新，因为 `action-gh-release` 按 tag 匹配。
+这是刻意保留的最后手段：只有在 tag 仍然指向你本来要发布的内容时，移动已发布的 tag
+才可接受。
