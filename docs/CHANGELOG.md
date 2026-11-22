@@ -29,6 +29,10 @@
   spectrum 53 µs, control JSON 897 µs — our handler is ~1.1% of the CPU, and the
   rest of `websocket_task`'s 15% is TLS and frame reassembly inside
   `esp_websocket_client`.
+- Store the waterfall as 8-bit palette indices instead of RGB565: the largest
+  single `.bss` block drops from 19,200 B to 10,624 B, steady-state `free` goes
+  48 → 57–59 KB and `largest` 27–42 → 38–48 KB, for 1–2 CPU points of palette
+  lookup while blending.
 
 ## v1.2.1 - 2026-11-21
 

@@ -756,3 +756,32 @@ Two observations worth keeping:
 - **Audio costs almost nothing per message** (70 µs for 642 B including the ring
   copy), so PCM16 at 50 messages/s is not what makes the network task busy. TLS at
   49 KB/s is.
+
+## 20. Waterfall storage: 8-bit indices (2026-11-22)
+
+The waterfall buffer was the largest single `.bss` block in the application:
+`uint16_t s_wf_buf[240 × 40]` = **19,200 B**. It is now one byte per pixel, an
+index into a 256-entry palette:
+
+| | before | after |
+|---|---:|---:|
+| waterfall buffer | 19,200 B | **10,624 B** (1,024 B palette + 9,600 B indices) |
+| steady-state `free` | 48 KB | **57–59 KB** |
+| steady-state `largest` | 27–42 KB | **38–48 KB** |
+| taskLVGL | 28–30% | **30–31%** |
+
+The cost is 1–2 CPU points: LVGL now looks each pixel up in the palette while
+blending instead of copying RGB565. With IDLE still at 40%, that is a good trade —
+`largest` is what the PTT TLS handshake depends on, and it gained 11 KB.
+
+**§12 said this was a dead end; it was not.** The conflict there was
+`lv_draw_buf_set_palette()` writing at `draw_buf->data` while the pixels were also
+written from offset 0. LVGL actually requires the palette **in front of** the
+pixels — `lv_draw_buf_goto_xy()` skips `palette_size * 4` bytes before addressing
+pixels — so the buffer simply has to be allocated with that space reserved. The
+canvas then works with `LV_COLOR_FORMAT_I8` and no custom draw callback at all.
+
+Trap worth recording: the palette must be filled **after** `heat_init()`. Setting
+it at canvas-creation time, before the Jet table existed, produced a waterfall of
+zeros — a completely black waterfall with no error anywhere. Look at the screen
+when changing anything palette-related.

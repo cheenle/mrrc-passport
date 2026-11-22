@@ -168,7 +168,16 @@ static void heat_init(void)
 #define PLOT_STEP_PX 2
 #define PLOT_PTS     (SCR_W / PLOT_STEP_PX)
 static lv_point_precise_t s_pts[PLOT_PTS];
-static uint16_t s_wf_buf[SCR_W * WF_H];
+/* Waterfall storage: one byte per pixel, an index into a 256-entry palette.
+ *
+ * RGB565 cost 19,200 B of .bss; indices cost 9,600 B plus the 1,024 B palette
+ * that LVGL requires *in front of* the pixels (lv_draw_buf_goto_xy skips it),
+ * so the saving is 8,576 B and the historical §12 note about "palette and pixels
+ * fighting over one buffer" was about pointing both at offset 0 — which this
+ * does not do.  LVGL converts index to RGB565 while blending; the area is small
+ * and it measured no worse than the previous plain copy. */
+#define WF_PAL_BYTES (256 * 4)
+static uint8_t s_wf_buf[WF_PAL_BYTES + SCR_W * WF_H];
 
 /* Waterfall scrolling: sweeps arrive at ~5.3 Hz while the UI ticks at 5 Hz.
  * Pushing a row only when data lands makes the history jump, so the previous
@@ -441,7 +450,7 @@ static void build_screen(void)
     /* ── waterfall: lv_canvas owns its buffer and LVGL re-reads it on
      * invalidate, which is the supported path for pixels written here. ── */
     s_wf_img = lv_canvas_create(lv_screen_active());
-    lv_canvas_set_buffer(s_wf_img, s_wf_buf, SCR_W, WF_H, LV_COLOR_FORMAT_RGB565);
+    lv_canvas_set_buffer(s_wf_img, s_wf_buf, SCR_W, WF_H, LV_COLOR_FORMAT_I8);
     lv_obj_set_pos(s_wf_img, 0, Y_WF);
 
     /* ── scale row: three fields like the handheld ── */
@@ -470,6 +479,21 @@ static void build_screen(void)
 
     heat_init();
     memset(s_wf_buf, 0, sizeof s_wf_buf);
+    /* The canvas holds 8-bit indices, so the Jet colours must reach LVGL as a
+     * palette.  s_heat keeps them as RGB565 (the trace/other paths use it), so
+     * widen each entry to RGB888 here — once, after heat_init() has filled it. */
+    for (int i = 0; i < 64; i++) {
+        const uint16_t v = s_heat[i];
+        const uint8_t r5 = (uint8_t)((v >> 11) & 0x1F);
+        const uint8_t g6 = (uint8_t)((v >> 5) & 0x3F);
+        const uint8_t b5 = (uint8_t)(v & 0x1F);
+        lv_color32_t c;
+        c.red   = (uint8_t)((r5 << 3) | (r5 >> 2));
+        c.green = (uint8_t)((g6 << 2) | (g6 >> 4));
+        c.blue  = (uint8_t)((b5 << 3) | (b5 >> 2));
+        c.alpha = 0xFF;
+        lv_canvas_set_palette(s_wf_img, (uint8_t)i, c);
+    }
 }
 
 /* Mirrors the handheld's fft_update(): EMA over the peak-downsampled columns. */
@@ -514,13 +538,14 @@ static void wf_push(void)
 {
     /* Newest row on top, older rows pushed down — time flows downward, matching
      * the handheld (whose ring buffer draws row 0 as the newest sample). */
-    memmove(s_wf_buf + SCR_W, s_wf_buf, sizeof(s_wf_buf) - SCR_W * sizeof(uint16_t));
-    uint16_t *last = s_wf_buf;
+    uint8_t *px = s_wf_buf + WF_PAL_BYTES;      /* palette lives in front */
+    memmove(px + SCR_W, px, (size_t)(SCR_W * (WF_H - 1)));
+    uint8_t *last = px;
     /* One measured sweep per row.  The tick matches the radio's sweep rate, so
      * there is nothing to interpolate between — the old code blended s_prev and
      * s_cur to fake the rows the slow tick could not produce. */
     for (int x = 0; x < SCR_W; x++)
-        last[x] = s_heat[BINS_TO_IDX(s_cur[x])];
+        last[x] = BINS_TO_IDX(s_cur[x]);
     lv_obj_invalidate(s_wf_img);
 }
 
