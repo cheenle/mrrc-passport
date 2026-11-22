@@ -20,6 +20,11 @@
   Two instruments were added behind `CONFIG_MRRC_PROFILE` to find this —
   `bsp_display_flush_stats()` (bytes/screens per second) and
   `bsp_display_flush_bands()` (the same pixels per 32-row band).
+- Draw the spectrum trace with one vertex every 2 columns instead of per column.
+  Control experiments put the trace at 25 CPU points while it covers only a
+  quarter of the flushed area — LVGL pays per anti-aliased segment, not per pixel.
+  `taskLVGL` 42% → 28–30%, IDLE 29% → 42–45%, with the same line weight and the
+  same repaint volume.
 
 ## v1.2.1 - 2026-11-21
 

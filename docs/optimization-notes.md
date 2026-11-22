@@ -689,3 +689,41 @@ canvas, because every row shifts down when a new one arrives) are about two thir
 of the remaining 344 KB/s, and the S-meter bar is most of the rest. Cutting further
 means design changes — a rotating-row waterfall so only the newest row is
 invalidated, or a slower tick — not more guards.
+
+---
+
+## 18. The trace, not the waterfall (2026-11-22)
+
+After §17 halved the repaint volume, taskLVGL was still 42%. Two control
+experiments said where the rest goes — freeze one widget, measure the CPU table:
+
+| Frozen | taskLVGL | IDLE | flush |
+|---|---:|---:|---:|
+| nothing (baseline) | 42% | 29% | 335 KB/s |
+| waterfall | 36–39% | 33–37% | 229 KB/s |
+| **spectrum trace** | **15–17%** | **55–57%** | 223 KB/s |
+
+The trace costs **25 CPU points while accounting for only a quarter of the
+flushed area**. That is the signature of per-segment cost, not per-pixel: LVGL
+builds an anti-aliased mask for each of the 239 segments of a 240-vertex
+polyline.
+
+| Change | taskLVGL | flush |
+|---|---:|---:|
+| 240 vertices, width 3 (old) | 42% | 335 KB/s |
+| 240 vertices, width 2 | 37–39% | 320 KB/s |
+| **120 vertices (2 px apart), width 3** | **28–30%** | 329 KB/s |
+| 120 vertices, width 2 | 28–30% | 329 KB/s |
+
+So vertex count is the cost and line width barely matters once segments are
+longer. The firmware now draws one vertex every 2 columns (`PLOT_STEP_PX 2`):
+flush volume unchanged, taskLVGL 42% → 28–30%, IDLE 29% → 42–45%, and the line
+keeps its original weight. Neighbouring FFT bins are correlated, so a 2 px step
+is not visible on a 240×45 trace; going further would start to show corners.
+
+**A dead end worth recording:** the plan for this round was to convert the
+waterfall to a rotating-row buffer so only the newest row would be invalidated.
+It does not work. When one row arrives and the picture scrolls, *every* visible
+row changes content, so LVGL must repaint the whole band no matter how the buffer
+is stored — the cost is in the redraw, not the memmove. The waterfall's whole
+share is 4–5 points (36–39% with it frozen), fifth of the trace's.

@@ -155,7 +155,19 @@ static void heat_init(void)
  * peak-downsampled to one per column before this.  The array was sized
  * max(BINS, SCR_W) = 850, which wasted 4880 bytes of .bss for points that were
  * never passed to the renderer. */
-static lv_point_precise_t s_pts[SCR_W];
+/* The trace is drawn as a polyline over PLOT_PTS vertices, one every
+ * PLOT_STEP_PX columns.
+ *
+ * It used to be one vertex per column (240).  Measurement said the cost is not
+ * the pixels but the per-segment anti-aliasing setup in LVGL: freezing the trace
+ * took taskLVGL from 42% to 15-17%, and halving the vertices took it to 28-30%
+ * while the flushed area stayed identical at 329 KB/s.  Two columns per vertex is
+ * indistinguishable on a 240 px wide, 45 px tall trace whose neighbouring bins
+ * are already correlated; going further would start to show as corners.
+ * See docs/optimization-notes.md §18. */
+#define PLOT_STEP_PX 2
+#define PLOT_PTS     (SCR_W / PLOT_STEP_PX)
+static lv_point_precise_t s_pts[PLOT_PTS];
 static uint16_t s_wf_buf[SCR_W * WF_H];
 
 /* Waterfall scrolling: sweeps arrive at ~5.3 Hz while the UI ticks at 5 Hz.
@@ -420,8 +432,11 @@ static void build_screen(void)
     /* This LVGL build has no separate cap style; rounded is what turns on
      * round joins and caps in the software renderer. */
     lv_obj_set_style_line_rounded(s_spec_line, true, 0);
-    for (int x = 0; x < SCR_W; x++) { s_pts[x].x = x; s_pts[x].y = PLOT_H - 1; }
-    lv_line_set_points(s_spec_line, s_pts, SCR_W);
+    for (int i = 0; i < PLOT_PTS; i++) {
+        s_pts[i].x = i * PLOT_STEP_PX;
+        s_pts[i].y = PLOT_H - 1;
+    }
+    lv_line_set_points(s_spec_line, s_pts, PLOT_PTS);
 
     /* ── waterfall: lv_canvas owns its buffer and LVGL re-reads it on
      * invalidate, which is the supported path for pixels written here. ── */
@@ -478,7 +493,8 @@ static void update_plot(bool tx)
      * `t` holds the clamped position scaled by 65535 so both divisions stay
      * exact without float. */
     const int32_t range = SCOPE_CEIL - SCOPE_FLOOR;
-    for (int x = 0; x < SCR_W; x++) {
+    for (int i = 0; i < PLOT_PTS; i++) {
+        const int x = i * PLOT_STEP_PX;
         const int32_t v = (int32_t)s_fft[x] >> 8;      /* Q8 -> whole units */
         int32_t t = 0;
         if (v > SCOPE_FLOOR) {
@@ -486,7 +502,7 @@ static void update_plot(bool tx)
             if (q > 65535) q = 65535;
             t = (int32_t)q;
         }
-        s_pts[x].y = (PLOT_H - 1) - (int32_t)((int64_t)t * (PLOT_H - 1) / 65535);
+        s_pts[i].y = (PLOT_H - 1) - (int32_t)((int64_t)t * (PLOT_H - 1) / 65535);
     }
     lv_obj_set_style_line_color(s_spec_line,
                                 lv_color_hex(tx ? C_RED : C_BLUE), 0);
