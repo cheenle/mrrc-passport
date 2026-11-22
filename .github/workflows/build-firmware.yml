@@ -57,10 +57,26 @@ jobs:
       # would boot, log "no SSID configured" and never reach the radio.  Build
       # yourself with your own credentials; GitHub attaches the source archives
       # to this release automatically.
+      # The release title is the annotated tag's subject, not the bare tag name:
+      # `git tag -a v1.4.0 -m "Mobile Link v1.4.0"` produces a release called
+      # "Mobile Link v1.4.0".  This replaces a manual rename after every release
+      # (docs/development/release/project-completion.md) with something the tag
+      # itself carries — the title and the version then cannot disagree, and no
+      # API token is needed to fix one.  A lightweight tag keeps the tag name.
+      - name: Read the release title from the tag
+        id: title
+        run: |
+          subject="$(git for-each-ref --format='%(contents:subject)' "refs/tags/${{ github.ref_name }}")"
+          if [ -z "$subject" ]; then
+            subject="${{ github.ref_name }}"
+          fi
+          printf 'value=%s\n' "$subject" >> "$GITHUB_OUTPUT"
+          echo "release title: $subject"
+
       - name: Create release (tag push, source only)
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          name: "${{ github.ref_name }}"
+          name: "${{ steps.title.outputs.value }}"
           body: >
             Source-only release. No prebuilt firmware is attached: a CI image
             cannot carry this terminal's Wi-Fi and server credentials, which are

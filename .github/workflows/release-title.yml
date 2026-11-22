@@ -1,0 +1,60 @@
+name: Release title
+
+# Why this exists: a release title is a product name plus the version, and the
+# version already lives in the tag. The convention used to be "rename it in the
+# web UI after the release" (docs/development/release/project-completion.md) —
+# which is exactly the kind of manual step that gets skipped, and cannot be done
+# at all from a machine that has push access but no API token.
+#
+# So: the title is data in the repository. Edit .github/release-title.json and
+# push; this workflow applies it with the runner's own GITHUB_TOKEN. Idempotent —
+# re-running with the same values changes nothing.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/release-title.json"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-title
+  cancel-in-progress: false
+
+jobs:
+  retitle:
+    name: Apply release title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Read the wanted title
+        id: want
+        run: |
+          tag="$(python3 -c 'import json;print(json.load(open(".github/release-title.json"))["tag"])')"
+          title="$(python3 -c 'import json;print(json.load(open(".github/release-title.json"))["title"])')"
+          if [ -z "$tag" ] || [ -z "$title" ]; then
+            echo "::error file=.github/release-title.json::tag and title are both required"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+
+      - name: Apply
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.want.outputs.tag }}"
+          title="${{ steps.want.outputs.title }}"
+          current="$(gh api "repos/${{ github.repository }}/releases/tags/$tag" --jq .name)"
+          if [ "$current" = "$title" ]; then
+            echo "already \"$title\" — nothing to do"
+            exit 0
+          fi
+          gh api -X PATCH "repos/${{ github.repository }}/releases/tags/$tag" \
+            -f name="$title" > /dev/null
+          echo "renamed \"$current\" -> \"$title\" ($tag)"

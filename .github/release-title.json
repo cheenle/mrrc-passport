@@ -1,0 +1,5 @@
+{
+  "_comment": "Applied by .github/workflows/release-title.yml on push. The release title is a product name plus the version (docs/development/release/project-completion.md); the tag carries the version, this file carries the name. Editing and pushing it re-titles the release without needing a token on the maintainer's machine.",
+  "tag": "v1.3.0",
+  "title": "Mobile Link v1.3.0"
+}

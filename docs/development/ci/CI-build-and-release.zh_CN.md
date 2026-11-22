@@ -85,3 +85,16 @@ tag 触发的 Release 只有在合并固件与它的 Release 说明一起发布�
 
 - `.github/workflows/build-firmware.yml`：本流水线定义。
 - 详见 `docs/hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.md`（硬件/烧录细节）。
+
+### Release 标题
+
+标题取自 tag 注释的标题行，所以名字与版本一起走：
+
+```bash
+git tag -a v1.4.0 -m "Mobile Link v1.4.0" && git push origin v1.4.0
+```
+
+轻量 tag 则沿用 tag 名。若标题仍要修，改 `.github/release-title.json` 并推送——
+`.github/workflows/release-title.yml` 会用 runner 的 token 应用它，因此发布这台机器上
+不需要任何 API token。（被它取代的旧惯例是"发布后去网页上改标题"：发布之后的手动步骤，
+正是最容易被跳过的那一步。）

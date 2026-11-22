@@ -87,3 +87,18 @@ consistent.
 
 - Firmware publishing to the community: [publish-to-community.md](../release/publish-to-community.md)
 - Post-release follow-up: [project-completion.md](../release/project-completion.md)
+
+### Release title
+
+The title is the annotated tag's subject, so the name and the version travel
+together:
+
+```bash
+git tag -a v1.4.0 -m "Mobile Link v1.4.0" && git push origin v1.4.0
+```
+
+A lightweight tag keeps the bare tag name. If a title still needs fixing, edit
+`.github/release-title.json` and push — `.github/workflows/release-title.yml`
+applies it with the runner's token, so no API token is needed on the machine that
+publishes the change. (The old convention — rename it in the web UI — is what this
+replaces: manual steps after a release are the ones that get skipped.)
