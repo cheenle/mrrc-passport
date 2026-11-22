@@ -89,7 +89,13 @@ static int s_feed_dbg;    /* first few frames: what do the bytes look like? */  
 static void rb_put(const uint8_t *d, size_t n)
 {
     if (n == 0 || n > AUD_FRAME_MAX) return;
-    if (xSemaphoreTake(s_rb_mtx, 0) != pdTRUE) { s_drops++; return; }
+    /* Wait briefly instead of not at all.  The consumer holds this mutex for one
+     * frame copy (~10 us), but a zero timeout turns every unlucky overlap into a
+     * dropped frame: a 13-minute soak showed the drop counter creeping up at
+     * ~1 per second with the ring nowhere near full, which is the signature of
+     * lock contention rather than overrun.  2 ms is 100x the hold time and far
+     * below one frame period, so a retry cannot make the stream late. */
+    if (xSemaphoreTake(s_rb_mtx, pdMS_TO_TICKS(2)) != pdTRUE) { s_drops++; return; }
     if (AUD_RB_BYTES - s_used < n + 2) {
         s_drops++;
         xSemaphoreGive(s_rb_mtx);

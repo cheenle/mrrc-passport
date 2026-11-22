@@ -33,6 +33,10 @@
   single `.bss` block drops from 19,200 B to 10,624 B, steady-state `free` goes
   48 → 57–59 KB and `largest` 27–42 → 38–48 KB, for 1–2 CPU points of palette
   lookup while blending.
+- Stop losing 2% of downlink frames to lock contention: `rb_put()` took the ring
+  mutex with a zero timeout, so every overlap with the consumer's copy discarded a
+  frame. A 2 ms timeout (100x the hold time, far below one frame period) leaves
+  only burst overruns, which are now minutes apart instead of continuous.
 
 ## v1.2.1 - 2026-11-21
 

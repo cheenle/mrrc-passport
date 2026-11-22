@@ -785,3 +785,30 @@ Trap worth recording: the palette must be filled **after** `heat_init()`. Settin
 it at canvas-creation time, before the Jet table existed, produced a waterfall of
 zeros — a completely black waterfall with no error anywhere. Look at the screen
 when changing anything palette-related.
+
+## 21. The steady 2% of drops was lock contention (2026-11-22)
+
+A 13-minute soak with everything else idle showed only one number moving: the
+drop counter crept up at ~57 per minute (≈2% of frames) while `free` sat at 56–58
+KB, `largest` at 42–44 KB, `glitch=0`, and there were zero reconnects, zero
+watchdog events and zero aborts. A ring that is 2% short every minute with no
+memory pressure is the signature of the *other* drop path: `rb_put()` took the
+ring mutex with a **zero** timeout, so any overlap with the consumer's frame copy
+(~10 µs) discarded the frame.
+
+Taking it with a 2 ms timeout — 100× the hold time, far below one 20 ms frame —
+removed the steady loss. The same soak afterwards:
+
+```
+minute   0  2  3    4    5  6  7  8  9   10  11
+drop     7 26 395  452  455 455 455 455 529 529 529
+per min    19 369   57   3   0   0   0  74  0   0
+```
+
+Drops are now **bursty instead of continuous**: minutes at zero, then a spike of
+50–370 when the network delivers a clump the 0.5 s ring cannot hold. Those are
+genuine overruns, and the remaining lever for them is latency (a larger
+pre-buffer) rather than CPU or memory.
+
+Both drop paths still increment one counter, so the notes cannot yet say which one
+a given spike was; splitting them is the first thing to do next time.
