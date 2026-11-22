@@ -56,8 +56,9 @@ void mrrc_state_unlock(void);
 void mrrc_net_start(void);
 bool mrrc_net_up(void);
 /* Current AP signal in dBm, or 0 when there is no station connection. */
-/* Ask the server to set the IF filter width (Hz). */
-void mrrc_net_set_filter(int hz);
+/* Ask the server to set the IF filter position (`filter_width`, an index on the
+ * radio's per-mode ladder).  Hz is derived server-side and read-only. */
+void mrrc_net_set_filter_width(int index);
 int mrrc_net_rssi(void);
 /* Switch to another configured network because the current one is delivering an
  * unusable audio stream (reason is only for the log). No-op when there is no

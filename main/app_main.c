@@ -59,7 +59,24 @@ static ui_mode_t s_ui_mode = UI_MODE_FREQ;
 #define STEP_COUNT   3
 #define FILTER_COUNT 4
 static const int STEP_HZ[STEP_COUNT]     = { 1000, 5000, 25000 };
-static const int FILTER_HZ[FILTER_COUNT] = { 1800, 2400, 2700, 3000 };
+/* What the plate shows.  The radio's ladder is an index, not a frequency:
+ *   voice  (SSB/AM/FM) FILTER_WIDTHS_VOICE  -> 1800/2400/2700/3000 Hz at 9/13/17/20
+ *   narrow (CW/RTTY/DATA/PSK) FILTER_WIDTHS_NARROW -> 1700/2400/3000/4000 at 15/17/18/21
+ * Sending Hz itself does nothing: `filter_hz` is derived server-side. */
+static const int FILTER_HZ[FILTER_COUNT]       = { 1800, 2400, 2700, 3000 };
+static const int FILTER_IDX_VOICE[FILTER_COUNT]  = { 9, 13, 17, 20 };
+static const int FILTER_IDX_NARROW[FILTER_COUNT] = { 15, 17, 18, 21 };
+static bool mode_is_narrow(void)
+{
+    const char *m = g_radio.mode_name;
+    return !strcmp(m, "CW-U") || !strcmp(m, "CW-L") || !strcmp(m, "RTTY-L") ||
+           !strcmp(m, "RTTY-U") || !strcmp(m, "DATA-L") || !strcmp(m, "DATA-U") ||
+           !strcmp(m, "PSK");
+}
+static int filter_index_for(int slot)
+{
+    return (mode_is_narrow() ? FILTER_IDX_NARROW : FILTER_IDX_VOICE)[slot];
+}
 static int s_step_hz   = 1000;
 static int s_step_idx  = 0;
 static int s_filter_hz = 2400;
@@ -73,13 +90,9 @@ static bool s_filter_sent;
  *
  * Splitting them means switching the speaker volume never costs a trip through
  * four radio modes, and the radio group keeps its place across local changes. */
-static const ui_mode_t LOCAL_MODES[] = { UI_MODE_VOL, UI_MODE_MIC };
-static const ui_mode_t RADIO_MODES[] = { UI_MODE_FREQ, UI_MODE_CHANNEL,
-                                         UI_MODE_STEP, UI_MODE_FILTER };
-#define LOCAL_N ((int)(sizeof LOCAL_MODES / sizeof LOCAL_MODES[0]))
-#define RADIO_N ((int)(sizeof RADIO_MODES / sizeof RADIO_MODES[0]))
-static int s_local_idx;
-static int s_radio_idx;
+/* The two families are still useful as documentation of what belongs where,
+ * even though one OK double-tap now walks all six positions in order. */
+static int s_local_idx;   /* kept: remembers the last local position */
 
 static const char *mode_name(ui_mode_t m)
 {
@@ -204,8 +217,10 @@ static void knob_step(bsp_btn_t btn)
         s_filter_idx = (s_filter_idx + dir + FILTER_COUNT) % FILTER_COUNT;
         s_filter_hz = FILTER_HZ[s_filter_idx];
         mrrc_ui_set_mode(s_ui_mode, s_filter_hz);
-        mrrc_net_set_filter(s_filter_hz);
-        ESP_LOGI(TAG, "filter -> %d Hz", s_filter_hz);
+        const int fi = filter_index_for(s_filter_idx);
+        mrrc_net_set_filter_width(fi);
+        ESP_LOGI(TAG, "filter -> %d Hz (index %d%s)", s_filter_hz, fi,
+                 mode_is_narrow() ? ", narrow" : "");
         settings_store();
         return;
     }
@@ -299,9 +314,7 @@ static void keys_task(void *arg)
      * not notice. */
     const int64_t PTT_IDLE_US = 900000;
     int64_t last_release_us = 0;       /* when any OK press was released */
-    int64_t dn_last_press_us = 0;      /* UP/DOWN double-tap detection */
-    int64_t dn_prev_hold_us = 0;       /* hold length of the previous arrow tap */
-    bsp_btn_t dn_last_btn = BSP_BTN_OK;
+
 
     /* Double/triple tap arbitration.
      *
@@ -397,34 +410,11 @@ static void keys_task(void *arg)
         if (e.btn == BSP_BTN_UP || e.btn == BSP_BTN_DOWN) {
             if (e.ev == BSP_BTN_PRESS) {
                 const int64_t now_us = esp_timer_get_time();
-                /* A deliberate double-tap on the same arrow cycles the radio
-                 * modes.  Measured on this board, because the guesses were
-                 * wrong: the key lock reports the release 120 ms late, so
-                 * press-to-press for a double-tap is 250-420 ms — a 200 ms
-                 * window never fired.  The window is therefore 450 ms, and the
-                 * first press must have been a short tap (<350 ms hold) so that
-                 * holding the key to sweep is never mistaken for it.
-                 * The first press has already stepped, so undo it — otherwise
-                 * changing modes would nudge the frequency by one step. */
-                const bool prev_was_tap = dn_prev_hold_us > 0 && dn_prev_hold_us < 350000;
-                if (dn_last_btn == e.btn && now_us - dn_last_press_us < 450000 &&
-                    prev_was_tap) {
-                    knob_step(e.btn == BSP_BTN_UP ? BSP_BTN_DOWN : BSP_BTN_UP);
-                    dn_last_press_us = 0;
-                    repeat = false;
-                    s_radio_idx = (s_radio_idx + 1) % RADIO_N;
-                    enter_mode(RADIO_MODES[s_radio_idx]);
-                    continue;
-                }
-                dn_last_press_us = now_us;
-                dn_last_btn = e.btn;
-                dn_prev_hold_us = 0;
                 knob_step(e.btn);
                 repeat = true;
                 repeat_btn = e.btn;
                 repeat_at = now_us + 350000;   /* then repeat */
             } else if (e.ev == BSP_BTN_RELEASE) {
-                if (dn_last_press_us) dn_prev_hold_us = esp_timer_get_time() - dn_last_press_us;
                 if (repeat) {
                     repeat = false;
                     settings_store();
@@ -454,8 +444,14 @@ static void keys_task(void *arg)
                      * changing volume should not have to pass through four
                      * radio-side modes to get back.  Radio modes live on the
                      * UP double-tap (see below). */
-                    s_local_idx = (s_local_idx + 1) % LOCAL_N;
-                    enter_mode(LOCAL_MODES[s_local_idx]);
+                    /* One cycle over everything the knob can point at.  The
+                     * radio group used to live on the arrow keys, but a
+                     * double-tap there fights the tuning taps — the operator
+                     * sweeps with the same key.  Keep mode changes on OK and
+                     * leave the arrows for tuning only. */
+                    const int all = (int)UI_MODE_COUNT;
+                    int next = ((int)s_ui_mode + 1) % all;
+                    enter_mode((ui_mode_t)next);
                 } else if (tap_count >= 3) {          /* third tap: cycle mode too */
                     tap_count = 0;
                     tap_deadline = 0;
@@ -538,7 +534,7 @@ void app_main(void)
             /* The server keeps the filter; push ours once the link is up so the
              * knob and the radio agree from the first second. */
             s_filter_sent = true;
-            mrrc_net_set_filter(s_filter_hz);
+            mrrc_net_set_filter_width(filter_index_for(s_filter_idx));
         }
         uint32_t dl = 0, df = 0, wf = 0, un = 0; uint64_t wsk = 0;
         size_t ru = 0, rumax = 0; bool mu = false, txf = false;

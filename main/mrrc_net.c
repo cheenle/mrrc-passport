@@ -550,11 +550,16 @@ bool mrrc_net_send_bin(const void *data, size_t len)
                                          pdMS_TO_TICKS(500)) >= 0;
 }
 
-/* IF filter width, in Hz.  The server owns the radio's filter; we only ask. */
-void mrrc_net_set_filter(int hz)
+/* IF filter, as a position on the radio's own ladder.
+ *
+ * `filter_hz` is derived by the server (get_filter_hz(mode, filter_width)) and is
+ * read-only; the settable field is `filter_width`, an index.  Sending Hz was why
+ * the knob appeared to do nothing.  The ladder differs per mode group, so the
+ * caller passes the index that belongs to the current mode. */
+void mrrc_net_set_filter_width(int index)
 {
     char msg[64];
-    snprintf(msg, sizeof msg, "{\"type\":\"set\",\"field\":\"filter_hz\",\"value\":%d}", hz);
+    snprintf(msg, sizeof msg, "{\"type\":\"set\",\"field\":\"filter_width\",\"value\":%d}", index);
     ws_send_text(msg);
 }
 
