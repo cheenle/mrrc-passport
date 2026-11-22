@@ -12,6 +12,15 @@
 
 ## Unreleased
 
+- Cut the UI's CPU share by a third without touching the layout. `refresh()`
+  rewrote the frequency and info-row labels whenever the state sequence moved,
+  and `lv_label_set_text()` invalidates even when the string is identical; those
+  two regions were 40% of every repaint. Labels are now compared before being
+  set: flush volume 526 → 344 KB/s, `taskLVGL` 56–61% → 43%, IDLE 7–14% → 28%.
+  Two instruments were added behind `CONFIG_MRRC_PROFILE` to find this —
+  `bsp_display_flush_stats()` (bytes/screens per second) and
+  `bsp_display_flush_bands()` (the same pixels per 32-row band).
+
 ## v1.2.1 - 2026-11-21
 
 - Remove the stutter in both directions. Five independent causes, each measured

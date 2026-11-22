@@ -508,6 +508,18 @@ static void wf_push(void)
     lv_obj_invalidate(s_wf_img);
 }
 
+/* Setting a label's text invalidates it even when the string is identical, and
+ * the diag line showed the frequency and the info row together accounting for
+ * 40% of every repaint.  Compare first: a label that did not change costs
+ * nothing.  Same rule the chip row already followed. */
+static void label_set_if_changed(lv_obj_t *lbl, const char *text)
+{
+    if (!lbl || !text) return;
+    const char *cur = lv_label_get_text(lbl);
+    if (cur && strcmp(cur, text) == 0) return;
+    lv_label_set_text(lbl, text);
+}
+
 static void refresh(void)
 {
     /* May write to the socket, so it runs before any LVGL work. */
@@ -537,29 +549,29 @@ static void refresh(void)
 
     if (main_changed) {
         format_freq(b, sizeof b, st.freq_hz);
-        lv_label_set_text(s_freq, b);
+        label_set_if_changed(s_freq, b);
         /* header: mode left, VFO / battery / wifi right */
-        lv_label_set_text(s_mode, st.mode_name[0] ? st.mode_name : "---");
+        label_set_if_changed(s_mode, st.mode_name[0] ? st.mode_name : "---");
         snprintf(b, sizeof b, "VFO %c", st.vfo ? st.vfo : 'A');
-        lv_label_set_text(s_vfo, b);
+        label_set_if_changed(s_vfo, b);
         /* Live scope span: drives this plate and the three axis labels below. */
         int32_t span = span_hz(st.scope_span);
         char spanb[16];
         format_span(spanb, sizeof spanb, span);
-        lv_label_set_text(s_spanplate, spanb);
+        label_set_if_changed(s_spanplate, spanb);
 
         /* Leftmost plate carries whatever the knob is pointed at — band name in
          * FREQ mode, channel name in CH, speaker level in VOL. */
         if (s_ui_mode == UI_MODE_VOL) {
             snprintf(b, sizeof b, "%d%%", s_mode_value);
-            lv_label_set_text(s_bandplate, b);
+            label_set_if_changed(s_bandplate, b);
         } else if (s_ui_mode == UI_MODE_MIC) {
             snprintf(b, sizeof b, "%d", s_mode_value);
-            lv_label_set_text(s_bandplate, b);
+            label_set_if_changed(s_bandplate, b);
         } else if (s_ui_mode == UI_MODE_CHANNEL && s_chan_lbl[0]) {
-            lv_label_set_text(s_bandplate, s_chan_lbl);
+            label_set_if_changed(s_bandplate, s_chan_lbl);
         } else if (st.band_name[0]) {
-            lv_label_set_text(s_bandplate, st.band_name);
+            label_set_if_changed(s_bandplate, st.band_name);
         }
 
         /* RSSI and battery do not move at 5 Hz — refresh them about every 2 s. */

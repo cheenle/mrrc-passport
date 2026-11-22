@@ -645,3 +645,47 @@ Two traps from this round, worth more than the numbers:
    server's gain went +12 → +3 dB and the clipping rate went *up* (5.0% → 5.8%),
    which is what proved the peaks were already at the ADC. A negative result that
    pointed straight at the real cause.
+
+---
+
+## 17. Where the repaint actually goes (2026-11-22)
+
+The CPU table had taskLVGL at 56–61% with IDLE at 7–14% — far more than a
+240×320 panel at 5.26 Hz should cost. Two instruments answered it, and both are
+worth keeping:
+
+1. **`bsp_display_flush_stats()`** — bytes and flushes handed to the panel. A full
+   screen is 153,600 B, so the number converts directly into "screens per second".
+2. **`bsp_display_flush_bands()`** — the same pixels bucketed into 32-row bands,
+   which says *where* the repainting happens rather than only how much.
+
+With the UI timer stopped, flush fell to **0 B/s**: nothing repaints
+unconditionally, so every byte was the cost of live data. The band histogram then
+named the culprit:
+
+```
+y000: 2%  y032:10%  y064:10%  y096:20%  y128:10%
+y160:16%  y192:16%  y224: 9%  y256: 4%  y288: 3%
+```
+
+The frequency (y032 + y064) and the info row (y096) were 40% of every repaint.
+`refresh()` rewrote those labels whenever `st.seq` moved, and `seq` also moves for
+changes those labels do not show — `lv_label_set_text()` invalidates even when the
+string is identical.
+
+Fix: `label_set_if_changed()` compares first, the rule the chip row already
+followed. Ten lines, no layout change:
+
+| | before | after |
+|---|---:|---:|
+| flush | 526 KB/s (3.5 screens/s) | **344 KB/s (2.3 screens/s)** |
+| flushes | 85/s | **56/s** |
+| taskLVGL | 56–61% | **43%** |
+| IDLE | 7–14% | **28%** |
+| frequency bands | 20% of repaint | **0%** |
+
+What is left is genuinely live: the trace (240×45) and the waterfall (the whole
+canvas, because every row shifts down when a new one arrives) are about two thirds
+of the remaining 344 KB/s, and the S-meter bar is most of the rest. Cutting further
+means design changes — a rotating-row waterfall so only the newest row is
+invalidated, or a slower tick — not more guards.

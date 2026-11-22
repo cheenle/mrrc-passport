@@ -468,6 +468,23 @@ void app_main(void)
                      (double)(fb - p_fb) / dt / 1024.0,
                      (double)(fb - p_fb) / dt / 153600.0,
                      (unsigned)((double)(fc - p_fc) / dt));
+            {
+                static uint32_t p_band[11];
+                uint32_t band[11];
+                bsp_display_flush_bands(band, 11);
+                double tot = 0;
+                for (int i = 0; i < 11; i++) tot += (double)(band[i] - p_band[i]);
+                if (tot > 0) {
+                    char line[192]; int n = 0;
+                    for (int i = 0; i < 11; i++) {
+                        const double pct = 100.0 * (double)(band[i] - p_band[i]) / tot;
+                        n += snprintf(line + n, sizeof line - n, "y%03d:%2.0f%% ",
+                                      i * 32, pct);
+                        p_band[i] = band[i];
+                    }
+                    ESP_LOGI(TAG, "redraw by band: %s", line);
+                }
+            }
             p_fb = fb; p_fc = fc;
             ESP_LOGI(TAG, "ws: total=%.1f KB/s (audio above is a subset)",
                      (double)(wrx - p_wrx) / dt / 1024.0);

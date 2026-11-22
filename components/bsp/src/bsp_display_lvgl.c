@@ -43,6 +43,10 @@ static lv_display_t *s_disp;
  * actually redrawing — the number that decides whether its CPU share is sane. */
 static volatile uint32_t s_flush_bytes;
 static volatile uint32_t s_flush_count;
+/* Pixels flushed per horizontal band of 32 rows, so the diag line can say *where*
+ * the repainting happens instead of only how much. */
+#define FLUSH_BANDS (BSP_LCD_H / 32 + 1)
+static volatile uint32_t s_flush_band[FLUSH_BANDS];
 static bool s_port_initialized;
 static bool s_port_init_failed;
 
@@ -59,6 +63,11 @@ static void rounded_flush_event(lv_event_t *event)
     const int32_t width = lv_area_get_width(area);
     s_flush_bytes += (uint32_t)width * lv_area_get_height(area) * sizeof(uint16_t);
     s_flush_count++;
+    {
+        const int32_t b0 = area->y1 / 32, b1 = area->y2 / 32;
+        for (int32_t b = b0; b <= b1 && b < FLUSH_BANDS; ++b)
+            s_flush_band[b] += (uint32_t)width;
+    }
     if (draw_buf->header.stride < (uint32_t)width * sizeof(uint16_t)) return;
 
     for (int32_t y = area->y1; y <= area->y2; ++y) {
@@ -178,4 +187,9 @@ void bsp_display_flush_stats(uint32_t *bytes, uint32_t *count)
 {
     if (bytes) *bytes = s_flush_bytes;
     if (count) *count = s_flush_count;
+}
+
+void bsp_display_flush_bands(uint32_t *out, int bands)
+{
+    for (int i = 0; i < bands && i < FLUSH_BANDS; ++i) out[i] = s_flush_band[i];
 }

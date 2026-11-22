@@ -31,6 +31,8 @@ esp_err_t bsp_display_prepare_deep_sleep(void);
 
 /* 累计的 LVGL flush 字节数与次数，用于诊断重绘量（见 app_main 的 flush: 行）。 */
 void bsp_display_flush_stats(uint32_t *bytes, uint32_t *count);
+/* Pixels flushed per 32-row band (320/32 + 1 = 11 bands on this panel). */
+void bsp_display_flush_bands(uint32_t *out, int bands);
 
 // ---------------------------------------------------------------------------
 // LVGL 接入(可选层)。必须先 bsp_display_init() 成功后再调。
