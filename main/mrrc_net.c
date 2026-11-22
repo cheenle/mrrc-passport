@@ -664,6 +664,7 @@ static size_t s_ap_count;
 static size_t s_ap_cur;              /* index being tried */
 static uint32_t s_disc_streak;       /* consecutive no-IP disconnects */
 static volatile bool s_switching;    /* a deliberate AP change is in flight */
+static int s_ap_bad = -1;            /* demoted for this session after a health kick */
 
 static void wifi_build_ap_list(void)
 {
@@ -680,6 +681,30 @@ static void wifi_build_ap_list(void)
         }
     }
     s_ap_cur = 0;
+}
+
+/* Index of the network that last obtained an IP, or -1.  Signal strength is a
+ * poor proxy for quality — a strong AP can be the congested one — so a network
+ * that worked before wins ties against a louder stranger. */
+static int wifi_last_good(void)
+{
+    nvs_handle_t h;
+    int32_t idx = -1;
+    if (nvs_open("mrrc", NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_i32(h, "wifi_last", &idx);
+        nvs_close(h);
+    }
+    return (idx >= 0 && (size_t)idx < s_ap_count) ? (int)idx : -1;
+}
+
+static void wifi_note_good(size_t idx)
+{
+    nvs_handle_t h;
+    if (nvs_open("mrrc", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_i32(h, "wifi_last", (int32_t)idx);
+        nvs_commit(h);
+        nvs_close(h);
+    }
 }
 
 /* Scan and return the index of the strongest configured SSID that is present,
@@ -702,11 +727,32 @@ static size_t wifi_pick_ap(void)
     wifi_ap_record_t rec[24];
     if (esp_wifi_scan_get_ap_records(&n, rec) != ESP_OK) return 0;
 
-    int best = -1, best_rssi = -127;
+    bool visible[WIFI_AP_MAX] = { false };
+    int rssi[WIFI_AP_MAX];
+    for (int k = 0; k < (int)s_ap_count; k++) rssi[k] = -127;
     for (int i = 0; i < n; i++) {
         for (size_t k = 0; k < s_ap_count; k++) {
             if (strcmp((const char *)rec[i].ssid, s_ap[k].ssid) != 0) continue;
-            if (rec[i].rssi > best_rssi) { best_rssi = rec[i].rssi; best = (int)k; }
+            visible[k] = true;
+            if (rec[i].rssi > rssi[k]) rssi[k] = rec[i].rssi;
+        }
+    }
+
+    /* 1. the one that worked last time, if it is here and not demoted;
+     * 2. otherwise the strongest visible that is not demoted;
+     * 3. otherwise anything visible at all. */
+    const int last = wifi_last_good();
+    if (last >= 0 && visible[last] && last != s_ap_bad) {
+        ESP_LOGI(TAG, "picked \"%s\" (rssi %d) of %u: last known good",
+                 s_ap[last].ssid, rssi[last], (unsigned)s_ap_count);
+        return (size_t)last;
+    }
+    int best = -1;
+    for (int pass = 0; pass < 2 && best < 0; pass++) {
+        for (size_t k = 0; k < s_ap_count; k++) {
+            if (!visible[k]) continue;
+            if (pass == 0 && (int)k == s_ap_bad) continue;   /* demoted */
+            if (best < 0 || rssi[k] > rssi[best]) best = (int)k;
         }
     }
     if (best < 0) {
@@ -715,7 +761,7 @@ static size_t wifi_pick_ap(void)
         return 0;
     }
     ESP_LOGI(TAG, "picked \"%s\" (rssi %d) of %u configured",
-             s_ap[best].ssid, best_rssi, (unsigned)s_ap_count);
+             s_ap[best].ssid, rssi[best], (unsigned)s_ap_count);
     return (size_t)best;
 }
 
@@ -769,6 +815,7 @@ void mrrc_net_wifi_kick(const char *reason)
     }
     ESP_LOGW(TAG, "wifi kick (%s): \"%s\" -> \"%s\"", reason,
              s_ap[s_ap_cur].ssid, s_ap[nxt].ssid);
+    s_ap_bad = (int)s_ap_cur;      /* do not drift back to it this session */
     s_switching = true;
     s_disc_streak = 0;
     wifi_apply_ap(nxt);
@@ -807,6 +854,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *ip = (const ip_event_got_ip_t *)data;
         s_disc_streak = 0;
+        wifi_note_good(s_ap_cur);
         ESP_LOGI(TAG, "ip " IPSTR " on \"%s\"", IP2STR(&ip->ip_info.ip), s_ap[s_ap_cur].ssid);
 #if CONFIG_LWIP_IPV6
         /* The interface must be UP before a link-local address can be

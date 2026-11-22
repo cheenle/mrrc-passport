@@ -498,22 +498,6 @@ void app_main(void)
                 }
             }
             p_fb = fb; p_fc = fc;
-        /* Audio health decides whether the link is worth staying on.  A hotspot
-         * can stay associated while delivering 10% loss and multi-second stalls;
-         * esp_wifi never calls that a disconnect, so the stream has to judge. */
-        {
-            static uint32_t p_drop, p_un2;
-            static int bad_windows;
-            const uint32_t ddrop = ad - p_drop;
-            const uint32_t dun = un - p_un2;
-            p_drop = ad; p_un2 = un;
-            const bool bad = (ddrop > 60 || dun > 3000);   /* >2% frames or >50 underruns/s */
-            if (bad) bad_windows++; else bad_windows = 0;
-            if (bad && bad_windows >= 2) {
-                bad_windows = 0;
-                mrrc_net_wifi_kick(ddrop > 60 ? "frame drops" : "underruns");
-            }
-        }
             {
                 static uint32_t pa, ps, pj, na, ns, nj;
                 uint32_t ca, cs, cj, qa, qs, qj;
@@ -542,6 +526,22 @@ void app_main(void)
 #endif
         }
 #endif
+        /* Audio health decides whether the link is worth staying on.  A hotspot
+         * can stay associated while delivering 10% loss and multi-second stalls;
+         * esp_wifi never calls that a disconnect, so the stream has to judge. */
+        {
+            static uint32_t p_drop, p_un2;
+            static int bad_windows;
+            const uint32_t ddrop = ad - p_drop;
+            const uint32_t dun = un - p_un2;
+            p_drop = ad; p_un2 = un;
+            const bool bad = (ddrop > 60 || dun > 3000);   /* >2% frames or >50 underruns/s */
+            if (bad) bad_windows++; else bad_windows = 0;
+            if (bad && bad_windows >= 2) {
+                bad_windows = 0;
+                mrrc_net_wifi_kick(ddrop > 60 ? "frame drops" : "underruns");
+            }
+        }
         unsigned k = 0, kf = 0, kfr = 0, ksf = 0, krf = 0, kld = 0;
         mrrc_tx_stats(&k, &kf, &kfr, &ksf, &krf, &kld);
         if (s_audio_task_h)
