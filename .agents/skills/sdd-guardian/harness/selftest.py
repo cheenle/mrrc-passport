@@ -516,6 +516,34 @@ class SddStructureTests(unittest.TestCase):
                           "chapter 12 states %r but no source literal %r"
                           % (words, literal))
 
+    def test_field_card_cannot_invent_a_number(self):
+        """Every multi-digit number on the field card must exist in the SDD.
+
+        The card is the copy someone reads in the field; if it drifts from the
+        record, the record stops mattering at exactly the wrong moment.
+        """
+        card = (ctx.PROJECT_ROOT / "docs/field-card.md").read_text(encoding="utf-8")
+        corpus = "\n".join(p.read_text(encoding="utf-8")
+                            for p in (self.sdd.glob("*.md"))
+                            if not p.name.endswith(".zh_CN.md"))
+        numbers = set(re.findall(r"\d[\d \u2009]{1,}\d|\d{2,}", card))
+        missing = []
+        for raw in numbers:
+            needle = raw.replace(" ", "").replace("\u2009", "")
+            if len(needle) < 2:
+                continue
+            if needle in corpus.replace(" ", "").replace("\u2009", ""):
+                continue
+            missing.append(needle)
+        self.assertEqual(sorted(set(missing)), [],
+                         "field card numbers absent from SDD/: %s" % sorted(set(missing)))
+
+    def test_field_card_and_sdd_both_have_a_chinese_peer(self):
+        for name in ("docs/field-card.md",):
+            p = ctx.PROJECT_ROOT / name
+            self.assertTrue(p.is_file(), name)
+            self.assertTrue(p.with_name(p.stem + ".zh_CN.md").is_file())
+
     def test_index_refs_point_at_real_sdd_items(self):
         idx = index()
         for topic in idx["topics"]:
