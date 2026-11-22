@@ -31,6 +31,10 @@ void mrrc_audio_link_stats(uint32_t *rx_bytes, uint32_t *underruns,
                            uint32_t *wr_max_us, size_t *used_max);
 /* How many times playback started after accumulating the pre-buffer cushion. */
 uint32_t mrrc_audio_rebuffers(void);
+/* Which drop path fired: mutex timeout vs ring full. */
+void mrrc_audio_drop_split(uint32_t *lock, uint32_t *full);
+/* Frames and samples written to I2S since boot (the consumer's real rate). */
+void mrrc_audio_written(uint32_t *frames, uint64_t *samples);
 
 /* Profiling: total frames played and the accumulated time spent in the audio
  * path.  dec_us is always 0 now that no decoder is linked in; the parameter is

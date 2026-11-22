@@ -419,13 +419,22 @@ void app_main(void)
         if (soc >= 0) mrrc_ui_set_battery(soc, false);
         uint32_t af = 0, ae = 0, ad = 0;
         mrrc_audio_stats(&af, &ae, &ad);
+        uint32_t dl = 0, df = 0, wf = 0; uint64_t wsk = 0;
+        mrrc_audio_drop_split(&dl, &df);
+        mrrc_audio_written(&wf, &wsk);
+        static uint32_t p_wf = 0; static uint64_t p_wsk = 0;
         ESP_LOGI(TAG, "idle free=%uK largest=%uK freq=%ld s=%d glitch=%u "
-                      "audio(frames=%u err=%u drop=%u)",
+                      "audio(frames=%u err=%u drop=%u lock=%u full=%u) "
+                      "i2s(%.1f f/s %.0f Hz)",
                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
                  (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
                  (long)g_radio.freq_hz, g_radio.s_meter,
                  (unsigned)bsp_button_glitch_count(),
-                 (unsigned)af, (unsigned)ae, (unsigned)ad);
+                 (unsigned)af, (unsigned)ae, (unsigned)ad,
+                 (unsigned)dl, (unsigned)df,
+                 (double)(wf - p_wf) / 60.0,
+                 (double)(wsk - p_wsk) / 60.0);
+        p_wf = wf; p_wsk = wsk;
 #if CONFIG_MRRC_PROFILE
         /* ── profile dump ─────────────────────────────────────────────── */
         {

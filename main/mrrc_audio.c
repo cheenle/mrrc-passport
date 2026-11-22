@@ -73,6 +73,12 @@ static uint32_t s_frames, s_errors, s_drops;
  *   used_max   ring high-water mark; sitting at AUD_RB_BYTES means the producer
  *              outruns the consumer. */
 static uint32_t s_rx_bytes, s_underruns, s_wr_max_us;
+/* Split the drop counter so a soak can say which path is firing. */
+static uint32_t s_drop_lock, s_drop_full;
+/* Frames actually written to I2S, and their total sample count — the drain rate
+ * that the producer has to match. */
+static uint32_t s_written;
+static uint64_t s_written_samples;
 static size_t   s_used_max;
 /* Pre-buffer state: false means "accumulating", true means "playing". */
 static bool     s_playing;
@@ -95,9 +101,10 @@ static void rb_put(const uint8_t *d, size_t n)
      * ~1 per second with the ring nowhere near full, which is the signature of
      * lock contention rather than overrun.  2 ms is 100x the hold time and far
      * below one frame period, so a retry cannot make the stream late. */
-    if (xSemaphoreTake(s_rb_mtx, pdMS_TO_TICKS(2)) != pdTRUE) { s_drops++; return; }
+    if (xSemaphoreTake(s_rb_mtx, pdMS_TO_TICKS(2)) != pdTRUE) { s_drops++; s_drop_lock++; return; }
     if (AUD_RB_BYTES - s_used < n + 2) {
         s_drops++;
+        s_drop_full++;
         xSemaphoreGive(s_rb_mtx);
         return;
     }
@@ -214,6 +221,8 @@ static void audio_task(void *arg)
         const int64_t t_wr = esp_timer_get_time();
         if (bsp_audio_write((const int16_t *)frame, samples * sizeof(int16_t)) != ESP_OK)
             s_errors++;
+        s_written++;
+        s_written_samples += samples;
         const uint32_t wr = (uint32_t)(esp_timer_get_time() - t_wr);
         if (wr > s_wr_max_us) s_wr_max_us = wr;
     }
@@ -296,6 +305,18 @@ void mrrc_audio_link_stats(uint32_t *rx_bytes, uint32_t *underruns,
 }
 
 uint32_t mrrc_audio_rebuffers(void) { return s_rebuffers; }
+
+void mrrc_audio_written(uint32_t *frames, uint64_t *samples)
+{
+    if (frames)  *frames  = s_written;
+    if (samples) *samples = s_written_samples;
+}
+
+void mrrc_audio_drop_split(uint32_t *lock, uint32_t *full)
+{
+    if (lock) *lock = s_drop_lock;
+    if (full) *full = s_drop_full;
+}
 
 void mrrc_audio_stats(uint32_t *frames, uint32_t *errors, uint32_t *drops)
 {

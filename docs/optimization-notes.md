@@ -810,5 +810,14 @@ Drops are now **bursty instead of continuous**: minutes at zero, then a spike of
 genuine overruns, and the remaining lever for them is latency (a larger
 pre-buffer) rather than CPU or memory.
 
-Both drop paths still increment one counter, so the notes cannot yet say which one
-a given spike was; splitting them is the first thing to do next time.
+Both drop paths still incremented one counter, so it was split — and the answer
+was immediate: **`lock=0`, everything is `full`**. The zero-timeout mutex was a
+latent fault, not the cause of these drops.
+
+With the split in place, the consumer was measured too (`i2s out`, frames and
+samples written per minute). Over a minute with continuous supply it is **exactly
+50.0 frames/s and 16,000 Hz** — the codec is not slow, and the producer is not
+fast. The remaining drops are therefore pure burst overruns: minutes with 0, then
+a spike of a few hundred when the network hands over a clump larger than the ring's
+slack (0.5 s ring minus the 160 ms pre-buffer). The lever for those is latency, not
+CPU, and they are not audible as continuous stutter.
