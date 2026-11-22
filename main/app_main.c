@@ -283,6 +283,46 @@ static bool start_tx(void)
     return true;
 }
 
+#if CONFIG_MRRC_PTT_SELFTEST
+#define PTT_SELFTEST_STACK 3072
+#define PTT_SELFTEST_KEYED_MS 5000
+
+/* Key the transmitter once, without a human, for measurement runs.
+ *
+ * This exists because the Kconfig option promised it and no code implemented it
+ * (found 2026-11-23 while trying to measure NFR-004: the switch was on the menu
+ * and did nothing).  It runs the same sequence as the OK long-press —
+ * start_tx() -> wait -> unkey -> resume — so the numbers it produces belong to
+ * the real path, not to a harness.
+ *
+ * Default n, and it keys on boot: never enable it in a shipped build. */
+static void ptt_selftest_task(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 120 && !mrrc_net_up(); i++) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    if (!mrrc_net_up()) {
+        ESP_LOGW(TAG, "selftest: no control link after 120 s, not keying");
+        vTaskDelete(NULL);
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(3000));          /* let the first frames settle */
+    if (!start_tx()) {
+        ESP_LOGE(TAG, "selftest: key refused");
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGW(TAG, "selftest: keyed %d ms", PTT_SELFTEST_KEYED_MS);
+    vTaskDelay(pdMS_TO_TICKS(PTT_SELFTEST_KEYED_MS));
+    mrrc_tx_key(false);
+    mrrc_net_set_ptt(false);
+    mrrc_audio_resume();
+    ESP_LOGW(TAG, "selftest: unkeyed");
+    vTaskDelete(NULL);
+}
+#endif
+
 static void keys_task(void *arg)
 {
     (void)arg;
@@ -509,6 +549,11 @@ void app_main(void)
         ESP_LOGE(TAG, "button init failed (ADC ladder on GPIO%d)", BSP_BTN_GPIO);
     }
     mem_report("buttons");
+
+#if CONFIG_MRRC_PTT_SELFTEST
+    if (xTaskCreate(ptt_selftest_task, "pttsel", PTT_SELFTEST_STACK, NULL, 4, NULL) != pdPASS)
+        ESP_LOGE(TAG, "selftest task create failed");
+#endif
 
     vol_load();
     /* Create the audio task and its jitter-buffer mutex BEFORE the socket can

@@ -552,6 +552,38 @@ class SddStructureTests(unittest.TestCase):
                                          "%s: %s" % (topic["id"], ref))
 
 
+class KconfigReachabilityTests(unittest.TestCase):
+    """A menu switch that nothing reads is a promise the firmware does not keep.
+
+    Found the hard way: MRRC_PTT_SELFTEST was on the menu, documented as "runs the
+    same sequence the OK long-press runs ... saves asking a human to hold a
+    button", and no code referenced it.  The measurement it promised could not be
+    taken, and the help text made it look like it could.
+    """
+
+    def options(self):
+        text = (ctx.PROJECT_ROOT / "main/Kconfig.projbuild").read_text(encoding="utf-8")
+        return re.findall(r"^\s+config\s+(MRRC_[A-Z0-9_]+)\s*$", text, re.M)
+
+    def sources(self):
+        blobs = []
+        for pat in ("main/*.c", "main/*.h", "components/**/*.c", "components/**/*.h"):
+            for path in ctx.PROJECT_ROOT.glob(pat):
+                blobs.append(path.read_text(encoding="utf-8", errors="replace"))
+        return "\n".join(blobs)
+
+    def test_every_option_is_read_somewhere(self):
+        src = self.sources()
+        unused = [o for o in self.options() if o not in src]
+        self.assertEqual(unused, [],
+                         "Kconfig option(s) promised by the menu but never read: %s"
+                         % ", ".join(unused))
+
+    def test_option_count_is_sane(self):
+        self.assertGreaterEqual(len(self.options()), 8,
+                                "Kconfig parse lost options — check the regex")
+
+
 class NvsOwnershipTests(unittest.TestCase):
     """One namespace, one owner per key.
 
