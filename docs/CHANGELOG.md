@@ -12,6 +12,24 @@
 
 ## Unreleased
 
+- Set the device up with no network of any kind: when there are no credentials, or
+  two connection attempts fail, the terminal raises its own access point
+  (DHCP 192.168.4.1, one page with Wi-Fi and server fields) and reboots into
+  station mode with what the phone submitted. Settings live in NVS and override
+  the Kconfig defaults, so a provisioned unit never needs a rebuild; a failed
+  save erases and retries once, because the Wi-Fi driver's per-boot NVS writes
+  eventually fill the 24 KB partition.
+- Two knob families instead of one cycle: OK double-tap walks the local pair
+  (VOL <-> MIC), UP/DOWN double-tap walks the radio group
+  (FREQ -> CH -> STEP -> FIL). Each keeps its own position. The arrow-key window
+  is 450 ms measured, and the first press's step is undone so changing modes never
+  nudges the frequency.
+- New STEP (1K/5K/25K) and FIL (1.8K/2.4K/2.7K/3.0K) positions, persisted in NVS;
+  the filter width is pushed to the server and re-sent once the link comes up.
+- Panel: the scale row lost its plates and hugs the screen edges, the chips bar
+  moved down to the bottom edge, and the waterfall gained a 1 px red centre
+  cursor.
+
 - Cut the UI's CPU share by a third without touching the layout. `refresh()`
   rewrote the frequency and info-row labels whenever the state sequence moved,
   and `lv_label_set_text()` invalidates even when the string is identical; those

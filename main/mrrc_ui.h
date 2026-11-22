@@ -9,6 +9,10 @@
  * bsp_lvgl_init(); reads state through mrrc_state_lock(). */
 void mrrc_ui_start(void);
 
+/* Setup mode has no frequency to show, so reuse the main labels for the one
+ * thing the operator needs: the SSID to join and the address to open. */
+void mrrc_ui_setup_hint(const char *ssid, const char *pass, const char *url);
+
 /* Which knob the UP/DOWN keys drive.  The badge in the top bar is the only
  * place this is visible, so it has to be obvious at a glance. */
 /* Knob targets.  Moved by OK double-tap; the same key cycles them.
@@ -22,7 +26,9 @@ typedef enum {
     UI_MODE_CHANNEL = 1,
     UI_MODE_VOL = 2,
     UI_MODE_MIC = 3,
-    UI_MODE_COUNT = 4
+    UI_MODE_STEP = 4,     /* tuning step: 1K / 5K / 25K */
+    UI_MODE_FILTER = 5,   /* IF filter: 1.8K / 2.4K / 2.7K / 3.0K */
+    UI_MODE_COUNT = 6
 } ui_mode_t;
 void mrrc_ui_set_mode(ui_mode_t mode, int volume_pct);
 

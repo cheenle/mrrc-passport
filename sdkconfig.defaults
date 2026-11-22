@@ -41,8 +41,9 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_LWIP_IPV6=y
 # 没有这一项，设备不会接收 Router Advertisement，就拿不到全局 IPv6。
 CONFIG_LWIP_IPV6_AUTOCONF=y
-# 终端只需要一个 STA 连接，不要 mesh/企业认证那套。
-CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
+# 平时只做 STA，但首次配网需要设备自己开热点（见 main/mrrc_prov.c），
+# 所以 AP 支持必须编进去。它只在配网时启用，那时 TLS/WS 还没起。
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
 CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
 
 # --- lwIP TCP 窗口 ---

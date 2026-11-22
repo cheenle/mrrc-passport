@@ -54,6 +54,64 @@ static QueueHandle_t s_key_q;
 static int s_spk_vol = VOL_DEFAULT;
 static ui_mode_t s_ui_mode = UI_MODE_FREQ;
 
+/* Knob settings that outlive a reboot.  STEP is what FREQ mode adds per click;
+ * FILTER is the IF width asked of the server. */
+#define STEP_COUNT   3
+#define FILTER_COUNT 4
+static const int STEP_HZ[STEP_COUNT]     = { 1000, 5000, 25000 };
+static const int FILTER_HZ[FILTER_COUNT] = { 1800, 2400, 2700, 3000 };
+static int s_step_hz   = 1000;
+static int s_step_idx  = 0;
+static int s_filter_hz = 2400;
+static int s_filter_idx = 1;
+static bool s_filter_sent;
+
+/* Two knob families with their own last-used position.
+ *
+ *   local  (OK double-tap):   VOL  <-> MIC          — this device's own audio
+ *   radio  (UP double-tap):   FREQ -> CH -> STEP -> FIL — things the radio owns
+ *
+ * Splitting them means switching the speaker volume never costs a trip through
+ * four radio modes, and the radio group keeps its place across local changes. */
+static const ui_mode_t LOCAL_MODES[] = { UI_MODE_VOL, UI_MODE_MIC };
+static const ui_mode_t RADIO_MODES[] = { UI_MODE_FREQ, UI_MODE_CHANNEL,
+                                         UI_MODE_STEP, UI_MODE_FILTER };
+#define LOCAL_N ((int)(sizeof LOCAL_MODES / sizeof LOCAL_MODES[0]))
+#define RADIO_N ((int)(sizeof RADIO_MODES / sizeof RADIO_MODES[0]))
+static int s_local_idx;
+static int s_radio_idx;
+
+static const char *mode_name(ui_mode_t m)
+{
+    switch (m) {
+        case UI_MODE_CHANNEL: return "CH";
+        case UI_MODE_VOL:     return "VOL";
+        case UI_MODE_MIC:     return "MIC";
+        case UI_MODE_STEP:    return "STEP";
+        case UI_MODE_FILTER:  return "FIL";
+        default:              return "FREQ";
+    }
+}
+
+/* Value the UI should show for a mode: percent, dB, Hz. */
+static int mode_value(ui_mode_t m)
+{
+    switch (m) {
+        case UI_MODE_MIC:    return bsp_audio_get_mic_gain_db();
+        case UI_MODE_STEP:   return s_step_hz;
+        case UI_MODE_FILTER: return s_filter_hz;
+        default:             return s_spk_vol;
+    }
+}
+
+static void enter_mode(ui_mode_t m)
+{
+    s_ui_mode = m;
+    mrrc_ui_set_mode(m, mode_value(m));
+    mrrc_ui_set_toast(mode_name(m));
+    ESP_LOGI(TAG, "mode -> %s", mode_name(m));
+}
+
 static void vol_load(void)
 {
     nvs_handle_t h;
@@ -74,21 +132,41 @@ static void vol_load(void)
         nvs_close(h);
     }
     bsp_audio_set_mic_gain_db((int)g);
+
+    /* Step and filter width likewise survive: an operator who set 25 kHz for
+     * band sweeping does not want 1 kHz again after a battery change. */
+    int32_t st = s_step_hz;
+    int32_t fi = s_filter_hz;
+    if (nvs_open("mrrc", NVS_READONLY, &h) == ESP_OK) {
+        (void)nvs_get_i32(h, "step_hz", &st);
+        (void)nvs_get_i32(h, "filter_hz", &fi);
+        nvs_close(h);
+    }
+    for (int i = 0; i < STEP_COUNT; i++)   if (STEP_HZ[i] == st)   { s_step_idx = i;   s_step_hz = STEP_HZ[i]; }
+    for (int i = 0; i < FILTER_COUNT; i++) if (FILTER_HZ[i] == fi) { s_filter_idx = i; s_filter_hz = FILTER_HZ[i]; }
+    ESP_LOGI(TAG, "knob: vol=%d%% mic=%d dB step=%d Hz filter=%d Hz",
+             s_spk_vol, bsp_audio_get_mic_gain_db(), s_step_hz, s_filter_hz);
 }
 
-static void vol_store(void)
+static void settings_store(void)
 {
     nvs_handle_t h;
     if (nvs_open("mrrc", NVS_READWRITE, &h) != ESP_OK) return;
     (void)nvs_set_i32(h, "spk_vol", s_spk_vol);
     (void)nvs_set_i32(h, "mic_gain", bsp_audio_get_mic_gain_db());
+    (void)nvs_set_i32(h, "step_hz", s_step_hz);
+    (void)nvs_set_i32(h, "filter_hz", s_filter_hz);
     (void)nvs_commit(h);
     nvs_close(h);
 }
 
+/* Older callers used the volume-only name. */
+static void vol_store(void) { settings_store(); }
+
 /* One step of whichever knob is active.  Shared by the single click and the
  * auto-repeat so both behave identically. */
 static int s_chan_idx;
+
 
 static void knob_step(bsp_btn_t btn)
 {
@@ -113,6 +191,25 @@ static void knob_step(bsp_btn_t btn)
         return;
     }
 
+    if (s_ui_mode == UI_MODE_STEP) {
+        s_step_idx = (s_step_idx + dir + STEP_COUNT) % STEP_COUNT;
+        s_step_hz = STEP_HZ[s_step_idx];
+        mrrc_ui_set_mode(s_ui_mode, s_step_hz);
+        ESP_LOGI(TAG, "step -> %d Hz", s_step_hz);
+        settings_store();
+        return;
+    }
+
+    if (s_ui_mode == UI_MODE_FILTER) {
+        s_filter_idx = (s_filter_idx + dir + FILTER_COUNT) % FILTER_COUNT;
+        s_filter_hz = FILTER_HZ[s_filter_idx];
+        mrrc_ui_set_mode(s_ui_mode, s_filter_hz);
+        mrrc_net_set_filter(s_filter_hz);
+        ESP_LOGI(TAG, "filter -> %d Hz", s_filter_hz);
+        settings_store();
+        return;
+    }
+
     if (s_ui_mode == UI_MODE_VOL) {
         s_spk_vol += dir * SPK_STEP;
         if (s_spk_vol < 0) s_spk_vol = 0;
@@ -126,7 +223,7 @@ static void knob_step(bsp_btn_t btn)
     const int32_t cur = g_radio.freq_hz;
     mrrc_state_unlock();
     if (cur <= 0) return;
-    mrrc_net_set_freq(cur + dir * 1000);
+    mrrc_net_set_freq(cur + dir * s_step_hz);
 }
 
 /* Heap by capability, not just a single total.
@@ -202,6 +299,9 @@ static void keys_task(void *arg)
      * not notice. */
     const int64_t PTT_IDLE_US = 900000;
     int64_t last_release_us = 0;       /* when any OK press was released */
+    int64_t dn_last_press_us = 0;      /* UP/DOWN double-tap detection */
+    int64_t dn_prev_hold_us = 0;       /* hold length of the previous arrow tap */
+    bsp_btn_t dn_last_btn = BSP_BTN_OK;
 
     /* Double/triple tap arbitration.
      *
@@ -296,15 +396,38 @@ static void keys_task(void *arg)
          */
         if (e.btn == BSP_BTN_UP || e.btn == BSP_BTN_DOWN) {
             if (e.ev == BSP_BTN_PRESS) {
+                const int64_t now_us = esp_timer_get_time();
+                /* A deliberate double-tap on the same arrow cycles the radio
+                 * modes.  Measured on this board, because the guesses were
+                 * wrong: the key lock reports the release 120 ms late, so
+                 * press-to-press for a double-tap is 250-420 ms — a 200 ms
+                 * window never fired.  The window is therefore 450 ms, and the
+                 * first press must have been a short tap (<350 ms hold) so that
+                 * holding the key to sweep is never mistaken for it.
+                 * The first press has already stepped, so undo it — otherwise
+                 * changing modes would nudge the frequency by one step. */
+                const bool prev_was_tap = dn_prev_hold_us > 0 && dn_prev_hold_us < 350000;
+                if (dn_last_btn == e.btn && now_us - dn_last_press_us < 450000 &&
+                    prev_was_tap) {
+                    knob_step(e.btn == BSP_BTN_UP ? BSP_BTN_DOWN : BSP_BTN_UP);
+                    dn_last_press_us = 0;
+                    repeat = false;
+                    s_radio_idx = (s_radio_idx + 1) % RADIO_N;
+                    enter_mode(RADIO_MODES[s_radio_idx]);
+                    continue;
+                }
+                dn_last_press_us = now_us;
+                dn_last_btn = e.btn;
+                dn_prev_hold_us = 0;
                 knob_step(e.btn);
-                if (s_ui_mode == UI_MODE_VOL) vol_store();
                 repeat = true;
                 repeat_btn = e.btn;
-                repeat_at = esp_timer_get_time() + 350000;   /* then repeat */
+                repeat_at = now_us + 350000;   /* then repeat */
             } else if (e.ev == BSP_BTN_RELEASE) {
+                if (dn_last_press_us) dn_prev_hold_us = esp_timer_get_time() - dn_last_press_us;
                 if (repeat) {
                     repeat = false;
-                    if (s_ui_mode == UI_MODE_VOL) vol_store();
+                    settings_store();
                 }
             }
             continue;
@@ -326,21 +449,13 @@ static void keys_task(void *arg)
                 ok_click_us = now;
 
                 if (tap_count == 2) {
-                    /* Act now — no waiting for the window to close. */
-                    s_ui_mode = (ui_mode_t)((s_ui_mode + 1) % UI_MODE_COUNT);
-                    /* Pass the value that belongs to the NEW mode: speaker
-                     * percent for VOL, microphone dB for MIC.  Always handing
-                     * over s_spk_vol made MIC display "60dB". */
-                    const int mv = (s_ui_mode == UI_MODE_MIC)
-                                 ? bsp_audio_get_mic_gain_db()
-                                 : s_spk_vol;
-                    mrrc_ui_set_mode(s_ui_mode, mv);
-                    const char *nm = s_ui_mode == UI_MODE_CHANNEL ? "CH"
-                                   : s_ui_mode == UI_MODE_VOL   ? "VOL"
-                                   : s_ui_mode == UI_MODE_MIC   ? "MIC"
-                                                                : "FREQ";
-                    mrrc_ui_set_toast(nm);
-                    ESP_LOGI(TAG, "mode -> %s", nm);
+                    /* OK double-tap walks the LOCAL family only: the speaker and
+                     * the microphone are this device's business, and an operator
+                     * changing volume should not have to pass through four
+                     * radio-side modes to get back.  Radio modes live on the
+                     * UP double-tap (see below). */
+                    s_local_idx = (s_local_idx + 1) % LOCAL_N;
+                    enter_mode(LOCAL_MODES[s_local_idx]);
                 } else if (tap_count >= 3) {          /* third tap: cycle mode too */
                     tap_count = 0;
                     tap_deadline = 0;
@@ -419,6 +534,12 @@ void app_main(void)
         if (soc >= 0) mrrc_ui_set_battery(soc, false);
         uint32_t af = 0, ae = 0, ad = 0;
         mrrc_audio_stats(&af, &ae, &ad);
+        if (!s_filter_sent && mrrc_net_up()) {
+            /* The server keeps the filter; push ours once the link is up so the
+             * knob and the radio agree from the first second. */
+            s_filter_sent = true;
+            mrrc_net_set_filter(s_filter_hz);
+        }
         uint32_t dl = 0, df = 0, wf = 0, un = 0; uint64_t wsk = 0;
         size_t ru = 0, rumax = 0; bool mu = false, txf = false;
         mrrc_audio_state(&un, &ru, &rumax, &mu, &txf);
@@ -427,7 +548,8 @@ void app_main(void)
         static uint32_t p_wf = 0; static uint64_t p_wsk = 0;
         ESP_LOGI(TAG, "idle free=%uK largest=%uK freq=%ld s=%d glitch=%u "
                       "audio(frames=%u err=%u drop=%u lock=%u full=%u) "
-                      "i2s(%.1f f/s) ring(%u/%u max %u) un=%u flush=%u mute=%d tx=%d",
+                      "i2s(%.1f f/s) ring(%u/%u max %u) un=%u flush=%u mute=%d tx=%d "
+                      "batt=%d%% %dmV",
                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
                  (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
                  (long)g_radio.freq_hz, g_radio.s_meter,
@@ -436,7 +558,8 @@ void app_main(void)
                  (unsigned)dl, (unsigned)df,
                  (double)(wf - p_wf) / 60.0,
                  (unsigned)ru, (unsigned)AUD_RB_BYTES_CONST, (unsigned)rumax,
-                 (unsigned)un, (unsigned)mrrc_audio_stall_flushes(), (int)mu, (int)txf);
+                 (unsigned)un, (unsigned)mrrc_audio_stall_flushes(), (int)mu, (int)txf,
+                 bsp_battery_soc(), bsp_battery_mv());
         p_wf = wf; p_wsk = wsk;
 #if CONFIG_MRRC_PROFILE
         /* ── profile dump ─────────────────────────────────────────────── */

@@ -102,8 +102,13 @@
                                          * tried and took the low-water heap mark
                                          * to 3 KB, too little for the TLS
                                          * handshake PTT needs. */
-#define Y_SCALE     254
-#define Y_CHIPS     272
+/* Scale row sits right under the waterfall (236 + 6 px).  It used to be at 254,
+ * which left an 18 px hole the operator read as a layout error. */
+#define Y_SCALE     242
+/* Bottom chips bar hugs the bottom edge: 290 + 22 = 312 of 320.  It cannot go
+ * lower — the panel's 30 px corner radius masks more than the 8 px text inset
+ * from about y=308 down, so the row would lose its first glyph. */
+#define Y_CHIPS     290
 #define H_CHIPS     22
 #define Y_TOAST     272   /* its own line above the scale row */
 
@@ -114,7 +119,7 @@ static lv_obj_t *s_bar[4];   /* RSSI meter: four rising bars */
 static lv_obj_t *s_freq;
 static lv_obj_t *s_sunit, *s_sbar, *s_fil, *s_af;
 static lv_obj_t *s_bandplate, *s_spanplate;
-static lv_obj_t *s_spec_line, *s_wf_img;
+static lv_obj_t *s_spec_line, *s_wf_img, *s_wf_mark;
 static lv_obj_t *s_sc_l, *s_sc_c, *s_sc_r;
 static lv_obj_t *s_chip_mode, *s_chip_tx, *s_chip_link;
 
@@ -210,6 +215,7 @@ static uint32_t s_last_meter = 0xFFFFFFFF;
 static int s_batt_pct = -1;
 static bool s_batt_charging;
 static ui_mode_t s_ui_mode = UI_MODE_FREQ;
+static volatile bool s_setup_mode;   /* setup screen owns the labels */
 static int s_spk_pct = 60;
 /* Generic knob position: speaker % in VOL mode, microphone dB in MIC mode. */
 static int s_mode_value = 60;
@@ -278,6 +284,21 @@ static lv_obj_t *field(const lv_font_t *font, int x, int y, int w, bool dim)
     lv_obj_set_style_pad_hor(l, 3, 0);
     lv_obj_set_style_pad_ver(l, 1, 0);
     if (w > 0) lv_obj_set_width(l, w);
+    lv_obj_set_pos(l, x, y);
+    lv_label_set_text(l, "");
+    return l;
+}
+
+/* Bare text: no plate behind it.  Used by the scale row, where a filled plate
+ * read as a chip and made the row look like another control. */
+static lv_obj_t *bare(const lv_font_t *font, lv_color_t color, int x, int y,
+                      int w, lv_text_align_t align)
+{
+    lv_obj_t *l = lv_label_create(lv_screen_active());
+    lv_obj_set_style_text_font(l, font, 0);
+    lv_obj_set_style_text_color(l, color, 0);
+    lv_obj_set_style_text_align(l, align, 0);
+    lv_obj_set_width(l, w);
     lv_obj_set_pos(l, x, y);
     lv_label_set_text(l, "");
     return l;
@@ -453,10 +474,31 @@ static void build_screen(void)
     lv_canvas_set_buffer(s_wf_img, s_wf_buf, SCR_W, WF_H, LV_COLOR_FORMAT_I8);
     lv_obj_set_pos(s_wf_img, 0, Y_WF);
 
+    /* Centre cursor: the waterfall's x axis is the VFO +/- span/2, so the tuned
+     * frequency is always the middle column.  A 1 px line marks it; it never
+     * moves, so it costs one invalidation at build time.  Drawn as an object on
+     * top of the canvas because the canvas buffer is overwritten row by row on
+     * every sweep — a line painted into it would scroll away with the data. */
+    s_wf_mark = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(s_wf_mark, 1, WF_H);
+    lv_obj_set_pos(s_wf_mark, SCR_W / 2, Y_WF);
+    lv_obj_set_style_bg_color(s_wf_mark, lv_color_hex(C_RED), 0);
+    lv_obj_set_style_bg_opa(s_wf_mark, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_wf_mark, 0, 0);
+    lv_obj_set_style_radius(s_wf_mark, 0, 0);
+    lv_obj_set_style_pad_all(s_wf_mark, 0, 0);
+    lv_obj_remove_flag(s_wf_mark, LV_OBJ_FLAG_SCROLLABLE);
+
     /* ── scale row: three fields like the handheld ── */
-    s_sc_l = field(&lv_font_montserrat_12, 2, Y_SCALE, 54, true);
-    s_sc_c = field(&lv_font_montserrat_12, 92, Y_SCALE, 56, false);
-    s_sc_r = field(&lv_font_montserrat_12, 184, Y_SCALE, 54, true);
+    /* No plate: plain white digits on the black background.  Left and right
+     * anchor to the screen edges so the span reads as absolute numbers rather
+     * than as three more chips. */
+    s_sc_l = bare(&lv_font_montserrat_12, lv_color_hex(C_TEXT), 2, Y_SCALE, 56,
+                  LV_TEXT_ALIGN_LEFT);
+    s_sc_c = bare(&lv_font_montserrat_12, lv_color_hex(C_TEXT), 92, Y_SCALE, 56,
+                  LV_TEXT_ALIGN_CENTER);
+    s_sc_r = bare(&lv_font_montserrat_12, lv_color_hex(C_TEXT), SCR_W - 58, Y_SCALE, 56,
+                  LV_TEXT_ALIGN_RIGHT);
 
     /* ── bottom chips: mode | RX/TX | link ── */
     bar(Y_CHIPS, H_CHIPS);
@@ -563,6 +605,10 @@ static void label_set_if_changed(lv_obj_t *lbl, const char *text)
 
 static void refresh(void)
 {
+    /* In setup mode the labels carry the SSID and the address; the normal
+     * refresh would overwrite them every 190 ms, and there is no radio state to
+     * show anyway. */
+    if (s_setup_mode) return;
     /* May write to the socket, so it runs before any LVGL work. */
     mrrc_net_chan_pump();
     mrrc_net_audio_pump();
@@ -580,8 +626,10 @@ static void refresh(void)
     /* The knob mode is ours, not the radio's: set it outside the main_changed
      * branch so it can never lag behind the keys by a server frame. */
     {
-        const char *m = s_ui_mode == UI_MODE_VOL   ? "VOL"
-                      : s_ui_mode == UI_MODE_MIC   ? "MIC"
+        const char *m = s_ui_mode == UI_MODE_VOL    ? "VOL"
+                      : s_ui_mode == UI_MODE_MIC    ? "MIC"
+                      : s_ui_mode == UI_MODE_STEP   ? "STEP"
+                      : s_ui_mode == UI_MODE_FILTER ? "FIL"
                       : s_ui_mode == UI_MODE_CHANNEL ? "CH" : "FREQ";
         if (strcmp(m, lv_label_get_text(s_chip_mode)) != 0) {
             lv_label_set_text(s_chip_mode, m);
@@ -608,6 +656,15 @@ static void refresh(void)
             label_set_if_changed(s_bandplate, b);
         } else if (s_ui_mode == UI_MODE_MIC) {
             snprintf(b, sizeof b, "%d", s_mode_value);
+            label_set_if_changed(s_bandplate, b);
+        } else if (s_ui_mode == UI_MODE_STEP) {
+            /* 1000 -> "1K", 25000 -> "25K" */
+            snprintf(b, sizeof b, "%dK", s_mode_value / 1000);
+            label_set_if_changed(s_bandplate, b);
+        } else if (s_ui_mode == UI_MODE_FILTER) {
+            /* 2400 -> "2.4K" */
+            snprintf(b, sizeof b, "%d.%dK", s_mode_value / 1000,
+                     (s_mode_value % 1000) / 100);
             label_set_if_changed(s_bandplate, b);
         } else if (s_ui_mode == UI_MODE_CHANNEL && s_chan_lbl[0]) {
             label_set_if_changed(s_bandplate, s_chan_lbl);
@@ -741,6 +798,23 @@ static void refresh(void)
 }
 
 static void ui_timer_cb(lv_timer_t *t) { (void)t; refresh(); }
+
+void mrrc_ui_setup_hint(const char *ssid, const char *pass, const char *url)
+{
+    if (!bsp_lvgl_lock(1000)) return;
+    lv_label_set_text(s_freq, "SETUP");
+    lv_label_set_text(s_mode, "WI-FI");
+    lv_label_set_text(s_vfo, "");
+    lv_label_set_text(s_bandplate, ssid);
+    lv_label_set_text(s_fil, "PASS");
+    lv_label_set_text(s_af, pass);
+    lv_label_set_text(s_spanplate, url);
+    lv_label_set_text(s_chip_mode, "SETUP");
+    lv_label_set_text(s_chip_tx, "");
+    lv_label_set_text(s_chip_link, "AP");
+    s_setup_mode = true;
+    bsp_lvgl_unlock();
+}
 
 void mrrc_ui_start(void)
 {

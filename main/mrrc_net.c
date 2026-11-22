@@ -31,7 +31,9 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mrrc_audio.h"
+#include "mrrc_cfg.h"
 #include "mrrc_net.h"
+#include "mrrc_prov.h"
 #include "mrrc_ui.h"
 #include "nvs.h"
 
@@ -301,6 +303,10 @@ void mrrc_net_ws_cost(uint32_t *us_audio, uint32_t *us_spec, uint32_t *us_json,
     if (n_json)   *n_json   = s_n_json;
 }
 
+#if CONFIG_LWIP_IPV6
+static void dump_ipv6(const char *when);
+#endif
+
 static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg; (void)base;
@@ -401,6 +407,10 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         break;
     }
     case WEBSOCKET_EVENT_ERROR:
+        /* When the socket dies, the useful question is whether the IPv6 path is
+         * still there: the server is IPv6-only, so a vanished prefix shows up
+         * here as EHOSTUNREACH rather than as a Wi-Fi problem. */
+        dump_ipv6("on ws error");
         ESP_LOGE(TAG, "/WSterminal error");
         break;
     default:
@@ -540,6 +550,14 @@ bool mrrc_net_send_bin(const void *data, size_t len)
                                          pdMS_TO_TICKS(500)) >= 0;
 }
 
+/* IF filter width, in Hz.  The server owns the radio's filter; we only ask. */
+void mrrc_net_set_filter(int hz)
+{
+    char msg[64];
+    snprintf(msg, sizeof msg, "{\"type\":\"set\",\"field\":\"filter_hz\",\"value\":%d}", hz);
+    ws_send_text(msg);
+}
+
 void mrrc_net_set_af_gain(int gain)
 {
     char msg[64];
@@ -581,9 +599,9 @@ static bool mrrc_login(void)
 {
     char url[160];
     snprintf(url, sizeof url, "https://%s:%d/api/auth/login",
-             CONFIG_MRRC_SERVER_HOST, CONFIG_MRRC_SERVER_PORT);
+             cfg_srv_host(), cfg_srv_port());
     char body[128];
-    snprintf(body, sizeof body, "{\"password\":\"%s\"}", CONFIG_MRRC_SERVER_PASSWORD);
+    snprintf(body, sizeof body, "{\"password\":\"%s\"}", cfg_srv_pass());
 
     esp_http_client_config_t cfg = {
         .url = url,
@@ -668,17 +686,22 @@ static int s_ap_bad = -1;            /* demoted for this session after a health 
 
 static void wifi_build_ap_list(void)
 {
-    const char *ssid[WIFI_AP_MAX] = { CONFIG_MRRC_WIFI_SSID, CONFIG_MRRC_WIFI_SSID2,
+    /* Entry 0 is whatever NVS holds (provisioned or Kconfig), the rest are the
+     * Kconfig alternates.  Same SSID twice is dropped below. */
+    const char *ssid[WIFI_AP_MAX] = { cfg_wifi_ssid(), CONFIG_MRRC_WIFI_SSID2,
                                       CONFIG_MRRC_WIFI_SSID3 };
-    const char *pass[WIFI_AP_MAX] = { CONFIG_MRRC_WIFI_PASSWORD, CONFIG_MRRC_WIFI_PASSWORD2,
+    const char *pass[WIFI_AP_MAX] = { cfg_wifi_pass(), CONFIG_MRRC_WIFI_PASSWORD2,
                                       CONFIG_MRRC_WIFI_PASSWORD3 };
     s_ap_count = 0;
     for (int i = 0; i < WIFI_AP_MAX; i++) {
-        if (ssid[i][0]) {
-            s_ap[s_ap_count].ssid = ssid[i];
-            s_ap[s_ap_count].password = pass[i];
-            s_ap_count++;
-        }
+        if (!ssid[i][0]) continue;
+        bool dup = false;
+        for (size_t k = 0; k < s_ap_count; k++)
+            if (strcmp(s_ap[k].ssid, ssid[i]) == 0) dup = true;
+        if (dup) continue;
+        s_ap[s_ap_count].ssid = ssid[i];
+        s_ap[s_ap_count].password = pass[i];
+        s_ap_count++;
     }
     s_ap_cur = 0;
 }
@@ -873,8 +896,11 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 static bool wifi_up(void)
 {
-    if (!CONFIG_MRRC_WIFI_SSID[0]) {
-        ESP_LOGE(TAG, "no SSID configured");
+    if (!cfg_has_wifi()) {
+        /* Nothing to connect to and no way to type it in: become the access
+         * point and let a phone hand us the credentials.  Does not return. */
+        ESP_LOGW(TAG, "no credentials configured -> setup AP");
+        mrrc_prov_run();
         return false;
     }
     s_net_ev = xEventGroupCreate();
@@ -920,7 +946,7 @@ static void start_ws(void)
      * separate endpoints (/WSradio, /WSaudioRX, /WSaudioTX) each cost a TLS
      * session; on a C3 with no PSRAM that was the binding constraint. */
     snprintf(uri, sizeof uri, "wss://%s:%d/WSterminal?token=%s",
-             CONFIG_MRRC_SERVER_HOST, CONFIG_MRRC_SERVER_PORT, s_token);
+             cfg_srv_host(), cfg_srv_port(), s_token);
 
     esp_websocket_client_config_t cfg = {
         .uri = uri,
@@ -947,8 +973,16 @@ static void net_task(void *arg)
 {
     (void)arg;
     if (!wifi_up()) {
-        ESP_LOGE(TAG, "wifi failed; /WSradio not started");
-        vTaskDelete(NULL);
+        /* One retry absorbs a router that is rebooting; if it still cannot join,
+         * the operator is somewhere none of the configured networks exist and
+         * the only way out is the setup page.  Provisioning never returns: it
+         * reboots into station mode once the phone has submitted the form. */
+        ESP_LOGW(TAG, "wifi failed; retrying once in 30 s");
+        vTaskDelay(pdMS_TO_TICKS(30000));
+        if (!wifi_up()) {
+            ESP_LOGW(TAG, "still no network -> setup mode");
+            mrrc_prov_run();
+        }
     }
     /* The server rate-limits /api/auth/login to 5 attempts per 5 minutes per
      * IP.  A fixed short retry parks this device inside the window forever,
