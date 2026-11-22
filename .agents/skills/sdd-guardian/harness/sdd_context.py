@@ -308,8 +308,19 @@ def resolve_sdd_ref(spec):
         return wrap(SDD_FILES["method"],
                     _sdd_row(SDD_FILES["method"], "| **%s** |" % spec))
     if spec[0].isdigit() and "." in spec:
-        return wrap(SDD_FILES["tx"], _slice_headings(
-            SDD_FILES["tx"], lambda m: m.group(2).startswith(spec + " ")))
+        chapter = spec.split(".")[0].zfill(2)
+        # Headings carry the chapter number unpadded ("4.4", "12.3"), so accept
+        # both spellings of the same section.
+        variants = [spec, spec.lstrip("0") or spec]
+        for path in sorted((PROJECT_ROOT / "SDD").glob("%s-*.md" % chapter)):
+            if path.name.endswith(".zh_CN.md"):
+                continue
+            rel = "SDD/" + path.name
+            for want in variants:
+                got = _slice_headings(rel, lambda m, w=want: m.group(2).startswith(w + " "))
+                if got:
+                    return wrap(rel, got)
+        return "no section %s" % spec
     return "unsupported sdd ref: %s" % spec
 
 

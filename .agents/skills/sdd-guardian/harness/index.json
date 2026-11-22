@@ -248,6 +248,37 @@
         "doc:docs/sdd-guardian.md#3. Adding a rule",
         "doc:AGENTS.md#§6 Acceptance"
       ]
+    },
+    {
+      "id": "operations",
+      "title": "Runtime behaviour: boot, reconnect, provisioning, switching",
+      "files": [
+        "main/app_main.c",
+        "main/mrrc_net.c",
+        "main/mrrc_prov.c",
+        "main/mrrc_cfg.c"
+      ],
+      "keywords": [
+        "boot",
+        "reconnect",
+        "backoff",
+        "timeout",
+        "provision",
+        "retry",
+        "switch",
+        "timing",
+        "restart",
+        "sequence",
+        "operational"
+      ],
+      "refs": [
+        "sdd:12.1",
+        "sdd:12.3",
+        "sdd:12.4",
+        "sdd:12.7",
+        "sdd:NFR-009",
+        "sdd:NFR-011"
+      ]
     }
   ]
 }

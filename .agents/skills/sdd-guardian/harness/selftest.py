@@ -348,7 +348,10 @@ class SddStructureTests(unittest.TestCase):
             if line.startswith("|") and "| pending |" in line:
                 cells = [c.strip() for c in line.strip("|").split("|")]
                 pending.add(cells[0])
-        self.assertTrue(pending, "no pending chapters found — update the test")
+        if not pending:
+            # All chapters written: the rule still applies to any chapter that
+            # later goes back to pending, so the parser stays.
+            self.skipTest("no chapter is pending; nothing can be cited wrongly")
         bodies = {
             p.name: p.read_text(encoding="utf-8")
             for p in self.sdd.glob("[0-9][0-9]-*.md") if not p.name.endswith(".zh_CN.md")
@@ -466,6 +469,52 @@ class SddStructureTests(unittest.TestCase):
         for ref in named:
             path = ctx.PROJECT_ROOT / ref.rstrip("/")
             self.assertTrue(path.exists(), "chapter 11 names a missing path: %s" % ref)
+
+    def test_executive_summary_stays_an_executive_summary(self):
+        """A summary rots by accretion. 60 lines is the budget, checked."""
+        path = self.sdd / "01-executive-summary.md"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertLessEqual(len(lines), 60,
+                             "chapter 01 is %d lines; summaries that grow stop being read"
+                             % len(lines))
+        text = "\n".join(lines)
+        for anchor in ("MRRC Terminal", "## Boundaries", "## Record status"):
+            self.assertIn(anchor, text)
+
+    def test_interface_table_is_complete(self):
+        text = (self.sdd / "04-system-context.md").read_text(encoding="utf-8")
+        rows = [ln for ln in text.splitlines() if re.match(r"^\| I-[0-9] \|", ln)]
+        self.assertGreaterEqual(len(rows), 9, "interface table lost rows")
+        labels = []
+        for row in rows:
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            self.assertEqual(len(cells), 6, "interface row must have 6 columns")
+            labels.append(cells[0])
+            self.assertTrue(cells[5], "%s: no owner" % cells[0])
+        self.assertEqual(labels, ["I-%d" % i for i in range(1, len(labels) + 1)])
+        # the three IPv6 switches are the whole network story; they belong here
+        for needle in ("CONFIG_LWIP_IPV6=y", "CONFIG_LWIP_IPV6_AUTOCONFIG=y",
+                       "esp_netif_create_ip6_linklocal"):
+            self.assertIn(needle, text)
+
+    def test_operational_timings_match_the_source(self):
+        """Chapter 12's numbers must exist in the code, or the chapter is a rumour."""
+        text = (self.sdd / "12-operational-model.md").read_text(encoding="utf-8")
+        net = (ctx.PROJECT_ROOT / "main/mrrc_net.c").read_text(encoding="utf-8")
+        app = (ctx.PROJECT_ROOT / "main/app_main.c").read_text(encoding="utf-8")
+        # (what the chapter promises, the literal that implements it)
+        pairs = [
+            ("30 s", "30"),
+            ("600 s", "600"),
+            ("20 s", "20000"),
+            ("12 s", "12000"),
+            ("3 000 ms", "3000"),
+        ]
+        for words, literal in pairs:
+            self.assertIn(words, text, "chapter 12 no longer states %r" % words)
+            self.assertIn(literal, net + app,
+                          "chapter 12 states %r but no source literal %r"
+                          % (words, literal))
 
     def test_index_refs_point_at_real_sdd_items(self):
         idx = index()

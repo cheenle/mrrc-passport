@@ -27,22 +27,22 @@
 | # | 章节 | ART 码 | 文件 | 状态 |
 | --- | --- | --- | --- | --- |
 | 00 | 校验纪律（本地增补） | — | [00-verification-discipline.md](00-verification-discipline.md) | 已写 |
-| 01 | Executive Summary | — | — | 待写 |
+| 01 | 执行摘要 | — | [01-executive-summary.md](01-executive-summary.md) | 已写 |
 | 03 | 项目定义（成功判据） | ENG 343 | [03-project-definition.md](03-project-definition.md) | 已写 |
-| 04 | System Context | APP 011 | — | 待写 |
+| 04 | 系统上下文 | APP 011 | [04-system-context.md](04-system-context.md) | 已写 |
 | 05 | Non-Functional Requirements | ART 0507 | [05-non-functional-requirements.md](05-non-functional-requirements.md) | 已写 |
 | 06 | 用例模型 | ART 0508 | [06-use-case-model.md](06-use-case-model.md) | 已写 |
 | 08 | Architecture Decisions | ART 0513 | [08-architecture-decisions.md](08-architecture-decisions.md) | 已写 |
 | 09 | 架构总览 | ART 0512 | [09-architecture-overview.md](09-architecture-overview.md) | 已写 |
 | 11 | 组件模型 | ART 0515 | [11-component-model.md](11-component-model.md) | 已写 |
-| 12 | Operational Model | ART 0522 | — | 待写 |
+| 12 | 运行模型 | ART 0522 | [12-operational-model.md](12-operational-model.md) | 已写 |
 | 13 | 可行性评估 | ART 0530 | [13-feasibility-assessment.md](13-feasibility-assessment.md) | 已写 |
 | 14 | 版本历史 | — | [14-version-history.md](14-version-history.md) | 已写 |
 | 15 | Transmit Safety Architecture | ART 0535 | [15-transmit-safety-architecture.md](15-transmit-safety-architecture.md) | 已写 |
 
-`待写` 的章节既不是占位符，也不得被当成"已有"来引用：那里的知识目前仍住在下面列出的
-工程笔记里，在成章之前那些笔记就是权威。写一个空章等于宣称本文档覆盖了它其实没有的
-内容——而这正是第 00 章 §V5 唯一禁止的事。
+V1.0 已无待写章节。这条规则对将来任何一章仍然成立：`待写` 的章节既不是占位符，也不得被
+当成"已有"来引用——那里的知识仍住在下面列出的工程笔记里，在成章之前那些笔记就是权威。
+写一个空章等于宣称本文档覆盖了它其实没有的内容，而这正是第 00 章 §V5 唯一禁止的事。
 
 ## 相关记录
 
@@ -66,7 +66,7 @@
 | 属性 | 值 |
 | --- | --- |
 | 文档 ID | SDD-MRRC-PASSPORT-2026-001 |
-| SDD 版本 | V0.2（第 00、03、05、06、08、09、11、13、14、15 章） |
+| SDD 版本 | V1.0（13 个适用章全部成章） |
 | 基线日期 | 2026-11-23 |
 | 硬件 | FoloToy AI Passport：ESP32-C3 rev v1.1，160 MHz 单核，400 KB SRAM，无 PSRAM，8 MB flash，240×320 ST7789，ES8311 编解码器 |
 | 验证单元 | MAC `98:c3:77:f5:4b:2c`，`/dev/ttyACM0` |
@@ -75,8 +75,8 @@
 | 音频 | PCM16 单声道 16 kHz，20 ms 一帧，上行单帧含 tag 共 641 B |
 | 传输 | 仅 `/WSterminal`（文本控制、`0x00` RX、`0x01` TX、`0x02` 频谱） |
 | 稳态实测 | `free` 57–59 KB，`largest` 38–48 KB，`taskLVGL` 28–30%，`IDLE` 42–45%，`i2s` 50.0 帧/秒，`drop=0` |
-| 已成章 | 00、03、05、06、08、09、11、13、14、15 |
-| 待写 | 01、04、12 |
+| 已成章 | 00、01、03、04、05、06、08、09、11、12、13、14、15 |
+| 待写 | 无 |
 
 ## 阅读顺序
 
