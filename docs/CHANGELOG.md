@@ -12,6 +12,15 @@
 
 ## Unreleased
 
+- Transmitting no longer tears the connection down. The server kept writing the
+  radio's RX audio to the terminal socket while it was keyed — 30 KB/s down
+  against 32 KB/s up on one TCP — so on a mobile link the uplink write blocked for
+  a second, the websocket client treated that as fatal and reconnected, and the
+  operator saw "PTT released by itself" with the key still held. A keyed socket
+  now gets no downlink audio (half duplex: it cannot hear), and the uplink send
+  timeout drops 500 -> 100 ms so a congested frame costs one frame instead of
+  half a second. Measured: 1500 frames / `sendfail=0` in a 30.5 s transmission,
+  50.0 frames/s, worst send 27.9 ms.
 - Set the device up with no network of any kind: when there are no credentials, or
   two connection attempts fail, the terminal raises its own access point
   (DHCP 192.168.4.1, one page with Wi-Fi and server fields) and reboots into

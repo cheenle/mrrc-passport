@@ -110,3 +110,52 @@ the ADC and improves SNR); the server's software gain only rescales samples that
 are already quantised. If a more sensitive microphone or a closer mic position
 pushes the device peak past ~90%, drop the MIC step to 24 dB rather than
 compensating in software.
+
+## 6. Transmit: the downlink was strangling the uplink (2026-11-22)
+
+**Symptom**: press PTT and it stops by itself after a few seconds. The obvious
+suspect is the key, and it is innocent — the button log shows one press held for
+16.5 s with no release until it was let go.
+
+**What actually happened**:
+
+```
+356863  OK LONG_PRESS -> PTT ON
+359660  esp_transport_write() returned 0, timeout_ms=1000
+        -> /WSterminal error -> disconnected -> "Failed to send the buffer"
+361069  tx: frames=78 sendfail=71          <- 7 frames out of 78 got out
+363870  reconnected ... and the same thing two seconds later
+373062  OK RELEASE (held=16.5 s)
+```
+
+**Root cause**: the server's terminal media pump wrote the radio's RX audio to
+every subscribed socket without looking at PTT. During transmission that socket
+therefore carried **32 KB/s up** (PCM16 microphone) *and* **30 KB/s down** (audio
+the device muted and discarded anyway) on one TCP connection. On a mobile link the
+downlink saturates the window, the uplink write blocks for a second, and
+`esp_websocket_client` treats a failed write as fatal and tears the connection
+down — the TX light goes out and it looks like the key released itself.
+
+**Two fixes**:
+
+1. **Server**: while a socket holds the PTT (`_ptt_key_ws is ws`), skip its
+   downlink audio entirely. A half-duplex radio is not receiving, so those frames
+   are 100% waste. Not counted as drops — the radio produced no audio to lose.
+2. **Device**: uplink send timeout 500 ms -> 100 ms. A frame that cannot be
+   written in 100 ms cannot be followed by the next four either; failing fast
+   costs one frame instead of turning the TX loop into 2 frames/s while the
+   microphone keeps producing 50.
+
+**Measured after**, one 30.5 s transmission:
+
+| | before | after |
+|---|---:|---:|
+| uplink frames | 78 in 4 s (~20/s) | **1500 in 30.5 s = 50.0/s** |
+| `sendfail` | 71 / 78 | **0 / 1500** |
+| worst send | 500 ms (timeout) | **27.9 ms**, `slow=0` |
+| WS disconnects during TX | every ~2 s | **0** |
+
+**A second finding from the same log**: `peak=32768` — the ADC is at full scale.
+That is device-side clipping, not the server's gain (which is 0 dB): the ES8311
+PGA was at 36 dB. Aim for `peak` between 20000 and 27000 (60–80% of full scale);
+30 dB measured 27522 on this board.

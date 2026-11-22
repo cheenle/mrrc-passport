@@ -546,8 +546,15 @@ void mrrc_net_send_text_stop(void) { ws_send_text("s:"); }
 bool mrrc_net_send_bin(const void *data, size_t len)
 {
     if (!s_ws || !esp_websocket_client_is_connected(s_ws)) return false;
+    /* 100 ms, not 500.  Uplink frames are 20 ms of audio: if the socket cannot
+     * take one in 100 ms it cannot take the next four either, and waiting half a
+     * second per frame turns a congested link into 2 frames/s of TX while the
+     * microphone keeps producing 50.  Dropping the frame is the honest answer —
+     * the sender is already 5 frames behind.  Measured on a mobile link
+     * 2026-11-22: 71 of 78 sends timed out at 500 ms; the 1 s transport timeout
+     * that follows is what tore the websocket down. */
     return esp_websocket_client_send_bin(s_ws, (const char *)data, (int)len,
-                                         pdMS_TO_TICKS(500)) >= 0;
+                                         pdMS_TO_TICKS(100)) >= 0;
 }
 
 /* IF filter, as a position on the radio's own ladder.
