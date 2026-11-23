@@ -78,6 +78,11 @@ void mrrc_net_set_af_gain(int gain);
  * "txhb"} for 5 s, so the TX task must heartbeat every 1.5 s. */
 void mrrc_net_set_ptt(bool on);
 
+/* Spectrum tier control: the terminal gives back waterfall bandwidth when the
+ * link cannot carry audio + full frames, and takes it back when it can. */
+void mrrc_net_spectrum_tier(const char *tier);
+const char *mrrc_net_link_tier(void);
+
 /* Jump to a stored channel: frequency and mode together. */
 void mrrc_net_set_chan(int index);
 /* Re-asserts the pending channel frequency once a mode transition has settled;

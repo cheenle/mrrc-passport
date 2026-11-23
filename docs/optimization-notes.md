@@ -948,3 +948,101 @@ unattended and nobody spoke, so the peak over 5 s of silence is silence. This is
 hole in the *method*, not in the firmware — the automated self-test can prove the
 path (256 frames, no failures) but cannot prove the level. Chapter 15 §15.5 now
 says so; a level measurement needs speech at the microphone and a human.
+
+## 25. The jitter governor: bound the ring instead of growing it (2026-11-23)
+
+§24's acceptance run failed NFR-001 — underruns 0–18/s (mean 6.5/s), `rebuf`
+2→9 — while `drop=0 err=0` and `rx` held 31.2 KB/s. The first instinct was
+"the 160 ms pre-buffer is too shallow, grow the ring." The ring itself said the
+opposite: `ring(15408/16384)` minute after minute, i.e. 98% full.
+
+Two consequences of a ring pinned near full, both measured in that run:
+
+1. **Latency.** 15 408 B ≈ 0.48 s — three times the cushion the design assumed
+   and more than a half-duplex radio exchange can tolerate.
+2. **The free-run cascade.** When the DMA finally starves, `bsp_audio_write()`
+   stops pacing the consumer loop; the next `rb_get` returns immediately and the
+   whole 14 KB drains in a burst, so *one* network gap becomes hundreds of
+   underruns and a rebuffer. This is the mechanism behind the 0–18/s spread.
+
+The fix is a **jitter governor** in `main/mrrc_audio.c`, not a bigger buffer:
+
+- **High-water trim** (`rb_put`): whenever a recovery burst pushes the ring past
+  `AUD_HI_BYTES` (12 288 B ≈ 384 ms), drop the *oldest* frames down to that mark.
+  What survives is the freshest audio, and latency is bounded above.
+- **Low-water repeat** (`audio_task`): when the ring runs dry, write the last
+  played frame again instead of handing the DMA an empty buffer. `bsp_audio_write`
+  keeps pacing at 20 ms/frame, so the cascade cannot start. The 200 ms dry rule
+  still triggers a rebuffer, and the 1 s stall-flush still discards stale audio,
+  so a repeat can never mask a dead link — it only bridges a gap the cushion can
+  absorb.
+
+The floor is deliberately the ring itself: it drains one 20 ms frame per write,
+so a "repeat below N bytes" threshold would only start earlier without buying
+slack. The pre-buffer (5 120 B ≈ 160 ms) is unchanged.
+
+New instruments, both behind `CONFIG_MRRC_PROFILE`:
+
+- idle line gains `gov(ins=… trim=…)` — frames repeated vs frames trimmed.
+- the `link:` line gains `sps=…` — samples written to I2S per second, the
+  consumer's real drain rate (≈16 000 at 16 kHz).
+
+Status: **implemented, not yet field-exercised** (SDD/00 §V5). The §24 table has
+not been re-run on a board. NFR-001 stays open until a live session shows
+`err=0 drop=0` with `sps≈16000` and `gov` accounting for the gaps; if underruns
+move after this change, `AUD_HI_BYTES` (384 ms) is the single knob, not the ring
+size.
+
+## 25. Stutter round 2: the codec was playing 2.4% slow (2026-11-23)
+
+The acceptance run (§24) left NFR-001 failing: 0–18 underruns/s and `rebuf` climbing. The
+summary everyone reaches for is "mobile link"; the measurement said otherwise.
+
+**What was measured, on the LAN, RSSI −29 dBm, `rx=31.2 KB/s`:**
+
+| | before | after |
+| --- | ---: | ---: |
+| samples written to I2S (per second) | **15 600** | **16 002** |
+| `i2s` frames/s | 46.8 | 50.0 |
+| underruns/s | 0–18 | **0** |
+| ring occupancy | pinned 13.5–15.4 KB (98%) | 2.5–12.8 KB, bounded |
+| `rebuf` (re-buffers) | +7 per 12 min | +1…3 per 7 min |
+| `taskLVGL` / `IDLE` | 36% / 33% | 27% / 46% |
+| `largest` | 28 KB | 38 KB |
+
+**Root cause.** `I2S_CLK_SRC_DEFAULT` on the C3 resolves to the **XTAL** source. With
+MCLK = 256·fs, the divider is `40 MHz / (256 × 16 000) = 9.77 → 10`, so the codec really
+ran at **15.625 kHz**. The stream arrives at 16 kHz, so playback was 2.4% slow: the ring
+filled to 98% and stayed there, and every "network gap" was really the consumer falling
+behind. Two things had been hiding it:
+
+- the old ring comment ("a 24 KB experiment changed nothing: the ring is permanently full,
+  so the bottleneck is playback draining slower than the stream arrives — do not grow this
+  until that is fixed") had already named the symptom and left it unfixed;
+- `design-v1.md` §3.2 recorded the clock as 16.03 kHz (+0.16%) from the PLL divider
+  arithmetic, without anyone measuring the *actual* drain rate. A design document that
+  computes a clock instead of measuring it is how a 2.4% error survives for days.
+
+Fix: `clk_src = I2S_CLK_SRC_PLL_160M` → `160 MHz/(256×16 000) = 39.06 → 39` → **16.026 kHz**,
+the +0.16% the jitter buffer is sized for.
+
+**Second fix (this round): the pre-buffer became a controller.** It used to gate only the
+start, then let the ring drift. Measured consequences of a 98%-full ring: half a second of
+latency, and when the DMA finally starved, `bsp_audio_write()` stopped pacing the loop and
+the consumer free-ran through 14 KB — one gap became a burst of underruns plus a re-buffer.
+The governor now keeps the cushion inside a band: trim the front above 384 ms, repeat the
+last frame (20 ms of held audio) below 128 ms instead of handing the DMA an empty buffer.
+`un=0` on every sample since.
+
+**Third fix: the waterfall gives back bandwidth.** The terminal asked for spectrum `high`
+(1701 B × ~11 fps ≈ 18 KB/s) unconditionally, on a path where audio alone needs 32 KB/s.
+There is no lower audio tier (AD-002, PCM16 only), so the only thing that can be given back
+is the waterfall: two consecutive bad minutes demote it to `low`, two clean minutes restore
+`high`, and the PTT path already drops it while keyed.
+
+**What this round did *not* fix, measured:** the terminal and the server are on different
+ISPs (`2408:8916:…` versus `2409:8a00:…`), so every frame crosses the public internet. In
+one five-minute window the downlink collapsed 31.2 → 10.6 KB/s with the device **54% idle**
+and the server reporting `max pump stall 4817 ms` and 440 dropped audio frames. That is a
+path limit, not a device limit, and it is what AD-007 predicted: the goal is graceful
+degradation, not continuity.

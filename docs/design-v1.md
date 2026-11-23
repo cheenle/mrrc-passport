@@ -87,6 +87,14 @@ MCLK = 256×fs and the only source is PLL_F160M (160 MHz):
 | 16 kHz | 4.096 MHz | 39 | ≈16.03 kHz |
 | 48 kHz | 12.288 MHz | 13 | ≈48.08 kHz |
 
+**Correction (2026-11-23)**: the table above is the *arithmetic* for the PLL source,
+and the firmware was not using it. `I2S_CLK_SRC_DEFAULT` resolves to XTAL (40 MHz) on the
+C3, whose divider is `40 MHz/(256×16 000) = 9.77 → 10` → MCLK 4.0 MHz → **15.625 kHz, 2.4%
+slow**, measured as 15 600 samples/s written to I2S while the stream arrived at 16 000. That
+is the real cause of the "permanently full ring" recorded further down this file: playback
+was draining slower than the producer, not the link being slow. The firmware now selects
+`I2S_CLK_SRC_PLL_160M` explicitly and measures **16 002 samples/s** — the +0.16% below.
+
 **Consequence**: the device clock runs about 0.16% fast, so a long listening
 session slowly drains the jitter buffer — roughly one second every ten minutes.
 Opus PLC and the peer's buffer absorb it, but it **must be measured over 30+

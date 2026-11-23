@@ -53,6 +53,23 @@ static const char *TAG = "audio";
  * rebuild the cushion if the ring stays dry — 160 ms at 32 KB/s. */
 #define AUD_PREBUF_BYTES 5120       /* ~160 ms */
 #define AUD_REBUFFER_US  200000LL   /* dry for 200 ms -> buffer again */
+/* The pre-buffer above used to act only once: it gated the *start*, then the
+ * ring drifted wherever the producer left it.  Measured on 2026-11-23 over 12
+ * minutes of live receive: the ring sat pinned at 13.5-15.4 KB (0.42-0.48 s,
+ * i.e. 98% of the buffer) with `rebuf` climbing 2 -> 9 and 0-18 underruns/s.
+ * Two consequences of a ring that full:
+ *
+ *  - latency is half a second, three times the cushion the design assumes;
+ *  - when the DMA finally starves, `bsp_audio_write()` stops pacing the loop
+ *    and the consumer free-runs through the whole 14 KB, so one network gap
+ *    becomes a burst of underruns and a re-buffer.
+ *
+ * So the cushion is now bounded above: trim back to HI when a recovery burst
+ * pushes past it (384 ms ceiling), and hold the pace with a repeated frame
+ * when the ring runs dry instead of letting the writer free-run.  The floor is
+ * the ring itself — it drains one 20 ms frame per write — so a low-water
+ * repeat would only start earlier without buying any more slack. */
+#define AUD_HI_BYTES   12288        /* ~384 ms: trim above this */
 /* A mobile link (a phone hotspot on a train, say) stalls for seconds: measured
  * 12% loss with RTT peaks of 3-10 s.  No feasible ring covers that, so do not
  * try — when the stream goes quiet this long, the audio already queued is stale
@@ -95,6 +112,10 @@ static size_t   s_used_max;
 static volatile bool s_playing;
 static int64_t  s_last_feed_us;
 static uint32_t s_flushes;   /* stall recoveries */
+static uint32_t s_inserts;   /* frames repeated to hold the pace (low water) */
+static uint32_t s_trims;     /* frames dropped from the front (high water) */
+static uint8_t  s_last[AUD_FRAME_MAX];
+static size_t   s_last_n;
 static uint32_t s_rebuffers;
 static int64_t  s_dry_since;
 static volatile bool s_muted;
@@ -115,6 +136,18 @@ static void rb_put(const uint8_t *d, size_t n)
      * lock contention rather than overrun.  2 ms is 100x the hold time and far
      * below one frame period, so a retry cannot make the stream late. */
     if (xSemaphoreTake(s_rb_mtx, pdMS_TO_TICKS(2)) != pdTRUE) { s_drops++; s_drop_lock++; return; }
+    /* High water: a recovery burst must not leave half a second of latency
+     * behind.  Trim from the front (oldest) down to AUD_HI_BYTES, so what
+     * survives is the freshest audio and the cushion stays where the design
+     * wants it.  This replaced the old "only when completely full" trim, which
+     * pinned the ring at 98% and never brought it back. */
+    while (s_used > AUD_HI_BYTES && s_used >= 2) {
+        const size_t len = (size_t)((s_rb[s_r] << 8) | s_rb[(s_r + 1) % AUD_RB_BYTES]);
+        if (len + 2 > s_used) break;
+        s_r = (s_r + 2 + len) % AUD_RB_BYTES;
+        s_used -= len + 2;
+        s_trims++;
+    }
     if (AUD_RB_BYTES - s_used < n + 2) {
         /* Full.  Which end to sacrifice depends on why it is full.
          *
@@ -208,6 +241,26 @@ static void audio_task(void *arg)
 
         const size_t n = rb_get(frame, sizeof frame, pdMS_TO_TICKS(100));
         if (n == 0) {
+            /* Nothing queued.  Repeat the last frame once instead of handing an
+             * empty buffer to the DMA: that keeps `bsp_audio_write()` pacing the
+             * loop at 20 ms per frame, which is what stops the free-run cascade
+             * (one starve -> writer returns immediately -> 14 KB drained in a
+             * burst -> hundreds of underruns).  A repeated frame is 20 ms of
+             * held audio; the audible failure it replaces is a re-buffer.
+             *
+             * If the stream is really gone the 200 ms dry rule below still
+             * takes over and rebuilds the cushion, so this cannot mask a dead
+             * link — it only bridges a gap the cushion can absorb. */
+            if (!s_muted && !mrrc_tx_active() && s_playing && s_last_n) {
+                (void)bsp_audio_write((const int16_t *)s_last, s_last_n);
+                s_inserts++;
+                if (s_dry_since == 0) s_dry_since = esp_timer_get_time();
+                else if (esp_timer_get_time() - s_dry_since > AUD_REBUFFER_US) {
+                    s_playing = false;
+                    s_dry_since = 0;
+                }
+                continue;
+            }
             /* An empty ring while we should be playing is an underrun: the DMA
              * has nothing to send and fills silence (auto_clear_after_cb). */
             if (!s_muted && !mrrc_tx_active()) {
@@ -250,6 +303,15 @@ static void audio_task(void *arg)
             }
             samples = out;
             if (samples == 0) continue;
+        }
+        /* Keep the frame we just played: it is the best guess for what the
+         * speaker should hold for the next 20 ms if the ring runs dry. */
+        {
+            const size_t bytes = samples * sizeof(int16_t);
+            if (bytes <= sizeof s_last) {
+                memcpy(s_last, frame, bytes);
+                s_last_n = bytes;
+            }
         }
         const int64_t t_wr = esp_timer_get_time();
         if (bsp_audio_write((const int16_t *)frame, samples * sizeof(int16_t)) != ESP_OK)
@@ -353,6 +415,12 @@ void mrrc_audio_link_stats(uint32_t *rx_bytes, uint32_t *underruns,
 uint32_t mrrc_audio_rebuffers(void) { return s_rebuffers; }
 
 uint32_t mrrc_audio_stall_flushes(void) { return s_flushes; }
+
+void mrrc_audio_governor(uint32_t *inserts, uint32_t *trims)
+{
+    if (inserts) *inserts = s_inserts;
+    if (trims) *trims = s_trims;
+}
 
 void mrrc_audio_state(uint32_t *underruns, size_t *used, size_t *used_max,
                       bool *muted, bool *tx)

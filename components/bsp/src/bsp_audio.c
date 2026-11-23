@@ -319,7 +319,17 @@ static esp_err_t i2s_full_duplex_init(void) {
     i2s_std_config_t std = {
         .clk_cfg = {
             .sample_rate_hz = 16000,
-            .clk_src = I2S_CLK_SRC_DEFAULT,
+            /* PLL_160M, not the DEFAULT source.  Measured on this board
+             * (2026-11-23): with XTAL (40 MHz, which is what
+             * I2S_CLK_SRC_DEFAULT resolves to on the C3) the integer divider
+             * is 40M/(256*16000) = 9.77 -> 10, so MCLK = 4.0 MHz and the codec
+             * actually plays 15.625 kHz.  That is 2.4% slow: the ring fills
+             * forever (measured `ring(15408/16384)` minute after minute), the
+             * governor trims frames to survive, and the audio is audibly
+             * stretched.  PLL_160M gives 160M/(256*16000) = 39.06 -> 39 ->
+             * 16.026 kHz (+0.16%), which is the drift the design documents and
+             * the jitter buffer is sized for. */
+            .clk_src = I2S_CLK_SRC_PLL_160M,
             .ext_clk_freq_hz = 0,
             .mclk_multiple = I2S_MCLK_MULTIPLE_256,
         },

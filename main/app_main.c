@@ -582,6 +582,8 @@ void app_main(void)
             mrrc_net_set_filter_width(filter_index_for(s_filter_idx));
         }
         uint32_t dl = 0, df = 0, wf = 0, un = 0; uint64_t wsk = 0;
+        uint32_t ins_n = 0, trim_n = 0;
+        mrrc_audio_governor(&ins_n, &trim_n);
         size_t ru = 0, rumax = 0; bool mu = false, txf = false;
         mrrc_audio_state(&un, &ru, &rumax, &mu, &txf);
         mrrc_audio_drop_split(&dl, &df);
@@ -590,7 +592,7 @@ void app_main(void)
         ESP_LOGI(TAG, "idle free=%uK largest=%uK freq=%ld s=%d glitch=%u "
                       "audio(frames=%u err=%u drop=%u lock=%u full=%u) "
                       "i2s(%.1f f/s) ring(%u/%u max %u) un=%u flush=%u mute=%d tx=%d "
-                      "batt=%d%% %dmV",
+                      "gov(ins=%u trim=%u) batt=%d%% %dmV",
                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
                  (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
                  (long)g_radio.freq_hz, g_radio.s_meter,
@@ -600,6 +602,7 @@ void app_main(void)
                  (double)(wf - p_wf) / 60.0,
                  (unsigned)ru, (unsigned)AUD_RB_BYTES_CONST, (unsigned)rumax,
                  (unsigned)un, (unsigned)mrrc_audio_stall_flushes(), (int)mu, (int)txf,
+                 (unsigned)ins_n, (unsigned)trim_n,
                  bsp_battery_soc(), bsp_battery_mv());
         p_wf = wf; p_wsk = wsk;
 #if CONFIG_MRRC_PROFILE
@@ -621,18 +624,21 @@ void app_main(void)
                          100.0 * (double)dus / (double)afr / 20000.0);
             uint32_t lrx = 0, lun = 0, lwr = 0;
             size_t lused = 0;
+            uint32_t wf_now = 0; uint64_t wsk_now = 0;
+            mrrc_audio_written(&wf_now, &wsk_now);
             mrrc_audio_link_stats(&lrx, &lun, &lwr, &lused);
             /* Deltas, not totals: the interesting value is this minute's rate. */
-            static uint32_t p_rx, p_un, p_wrx; static int64_t p_us;
+            static uint32_t p_rx, p_un, p_wrx; static uint64_t p_wsk2; static int64_t p_us;
             const int64_t now_us = esp_timer_get_time();
             const double dt = p_us ? (double)(now_us - p_us) / 1e6 : 0.0;
             if (dt > 1.0) {
                 ESP_LOGI(TAG, "link: rx=%.1f KB/s underruns=%u/s wr_max=%u us "
-                              "rb_used_max=%u/%u rebuf=%u rssi=%d",
+                              "rb_used_max=%u/%u rebuf=%u rssi=%d sps=%.0f",
                          (double)(lrx - p_rx) / dt / 1024.0,
                          (unsigned)((double)(lun - p_un) / dt),
                          (unsigned)lwr, (unsigned)lused, (unsigned)16384,
-                         (unsigned)mrrc_audio_rebuffers(), mrrc_net_rssi());
+                         (unsigned)mrrc_audio_rebuffers(), mrrc_net_rssi(),
+                         (double)(wsk_now - p_wsk2) / dt);
             }
             const uint32_t wrx = mrrc_net_ws_rx_bytes();
             unsigned tsm = 0, tslow = 0, tloop = 0, tstall = 0;
@@ -679,7 +685,7 @@ void app_main(void)
                      (double)(wrx - p_wrx) / dt / 1024.0);
             ESP_LOGI(TAG, "txlink: send_max=%u us slow=%u loop_max=%u us stalls=%u",
                      (unsigned)tsm, (unsigned)tslow, (unsigned)tloop, (unsigned)tstall);
-            p_rx = lrx; p_un = lun; p_wrx = wrx; p_us = now_us;
+            p_rx = lrx; p_un = lun; p_wrx = wrx; p_wsk2 = wsk_now; p_us = now_us;
             /* Per-task CPU needs the tick hook; the link counters above do not,
              * so keep the two switches independent. */
 #if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
@@ -701,6 +707,29 @@ void app_main(void)
             p_drop = ad; p_un2 = un;
             const bool bad = (ddrop > 60 || dun > 3000);   /* >2% frames or >50 underruns/s */
             if (bad) bad_windows++; else bad_windows = 0;
+            /* Bandwidth triage.  The terminal has no audio tier below PCM16
+             * (AD-002), so when the path cannot carry audio + a full spectrum
+             * frame the only thing it can give back is the waterfall: 18 KB/s
+             * of "high" frames is more than half of a starved WAN link, while
+             * the operator is listening, not watching.  Demote on the second
+             * bad minute, restore after two clean ones — hysteresis, because a
+             * flapping tier costs a round trip each way. */
+            {
+                static int good_windows;
+                const char *tier = mrrc_net_link_tier();
+                if (bad && bad_windows >= 2 && strcmp(tier, "low") != 0) {
+                    mrrc_net_spectrum_tier("low");
+                    good_windows = 0;
+                } else if (!bad) {
+                    good_windows++;
+                    if (good_windows >= 2 && strcmp(tier, "low") == 0 && !txf) {
+                        mrrc_net_spectrum_tier("high");
+                        good_windows = 0;
+                    }
+                } else {
+                    good_windows = 0;
+                }
+            }
             if (bad && bad_windows >= 2) {
                 bad_windows = 0;
                 mrrc_net_wifi_kick(ddrop > 60 ? "frame drops" : "underruns");

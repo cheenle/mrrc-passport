@@ -53,6 +53,10 @@ static const char *TAG = "net";
  * drawn — and on this board every byte of it shares the one TCP connection
  * with the uplink audio. */
 static volatile bool s_tx_busy;
+/* Spectrum tier the link is currently judged able to carry.  Declared up here
+ * because the session handshake, the PTT path and the link-health watcher all
+ * read or write it. */
+static const char *s_link_tier = "high";
 
 /* Every payload byte that arrives on the socket, whatever its type.  Compared
  * with the audio-only counter in mrrc_audio.c this says whether a shortfall is
@@ -318,13 +322,17 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         s_ctrl_up = true;
         /* high = Full: one frame per radio sweep, 850 bins, ~5.3 frames/s.
          *
+         * The tier is whatever the link was last judged able to carry (see
+         * mrrc_net_spectrum_tier); "high" until the governor demotes it.
          * This was "mid" (divider 2, 425 bins, ~2.7 frames/s).  Each frame is
          * one row of waterfall history, so at half the sweep rate the display
          * could only ever advance in visible steps.  The 850-bin buffer this
          * firmware already allocates was sized for Full from the start; the
          * extra ~55 kbit/s is small next to the 256 kbit/s audio uplink. */
-        esp_websocket_client_send_text(s_ws, "{\"type\":\"spectrumCaps\",\"profile\":\"high\"}",
-                                       (int)strlen("{\"type\":\"spectrumCaps\",\"profile\":\"high\"}"),
+        char caps_msg[64];
+        snprintf(caps_msg, sizeof caps_msg,
+                 "{\"type\":\"spectrumCaps\",\"profile\":\"%s\"}", s_link_tier);
+        esp_websocket_client_send_text(s_ws, caps_msg, (int)strlen(caps_msg),
                                        pdMS_TO_TICKS(500));
         /* Declare the PCM16 audio profile (server side: AD-038).
          *
@@ -452,13 +460,29 @@ void mrrc_net_set_ptt(bool on)
      * Restored on unkey so the operator gets the full-resolution sweep back
      * the moment they stop talking. */
     s_tx_busy = on;
-    const char *tier = on ? "low" : "high";
+    /* Unkeying restores the tier the link was judged able to carry, not
+     * unconditionally "high" — a starved link gets "high" back only after the
+     * governor has seen it recover. */
+    mrrc_net_spectrum_tier(on ? "low" : s_link_tier);
+}
+
+/* Which spectrum tier the link can carry.  Measured 2026-11-23 on a WAN path
+ * (terminal on one ISP, server on another): the downlink collapsed to 17 KB/s
+ * while the device kept asking for "high" — a 1701 B full frame at ~11 fps is
+ * ~18 KB/s, i.e. more than the whole link, competing with the 32 KB/s of audio
+ * that actually matters.  The terminal has no lower audio tier (AD-002: PCM16
+ * only), so the only bandwidth it can give back is the waterfall's. */
+void mrrc_net_spectrum_tier(const char *tier)
+{
+    if (!s_ws || !tier || !tier[0]) return;
+    if (strcmp(tier, s_link_tier) != 0) s_link_tier = tier;
     char cap[64];
     snprintf(cap, sizeof cap, "{\"type\":\"spectrumCaps\",\"profile\":\"%s\"}", tier);
     esp_websocket_client_send_text(s_ws, cap, (int)strlen(cap), pdMS_TO_TICKS(500));
-
-    ESP_LOGI(TAG, "PTT %s, spectrum %s", on ? "ON" : "OFF", tier);
+    ESP_LOGI(TAG, "spectrum tier -> %s", tier);
 }
+
+const char *mrrc_net_link_tier(void) { return s_link_tier; }
 
 /* Settle the wire format.  Called from the UI tick (5 Hz), which is far more
  * often than needed but costs two comparisons.  A server that never answers

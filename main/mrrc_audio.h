@@ -43,6 +43,10 @@ void mrrc_audio_written(uint32_t *frames, uint64_t *samples);
 /* Stall recoveries: the stream was quiet for over a second and the queued audio
  * was discarded instead of being replayed stale. */
 uint32_t mrrc_audio_stall_flushes(void);
+
+/* Jitter governor counters: frames repeated to hold the pace (low water) and
+ * frames trimmed from the front to keep latency bounded (high water). */
+void mrrc_audio_governor(uint32_t *inserts, uint32_t *trims);
 void mrrc_audio_state(uint32_t *underruns, size_t *used, size_t *used_max,
                       bool *muted, bool *tx);
 
