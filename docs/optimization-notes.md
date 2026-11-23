@@ -1046,3 +1046,53 @@ one five-minute window the downlink collapsed 31.2 → 10.6 KB/s with the device
 and the server reporting `max pump stall 4817 ms` and 440 dropped audio frames. That is a
 path limit, not a device limit, and it is what AD-007 predicted: the goal is graceful
 degradation, not continuity.
+
+## 26. Transmit died 2 s in: a fatal write timeout, not a slow link (2026-11-24)
+
+Reproduced with the automatic self-test and a serial capture, so both ends were
+visible in the same window. Device side:
+
+```
+selftest: keyed 5000 ms
+transport_base: Poll timeout or error, timeout_ms=100
+websocket_client: esp_transport_write() returned 0
+net: /WSterminal error -> disconnected -> Failed to send the buffer
+tx done: frames=104 sendfail=146 readfail=0 peak=18633 send_max=109805 us
+```
+
+Server side, same transmission: `Terminal client disconnected during TX! Forcing
+RX`, and no session record at all.
+
+**Two faults, both self-inflicted.**
+
+1. **A missed capability ack tripled the uplink.** With no `audioCaps` reply within
+   3 s the firmware fell back to 48 kHz PCM, whose transmit path upsamples 3:1 —
+   32 KB/s becomes ~96 KB/s, on the link that had just failed to deliver one small
+   text frame. Measured consequence: `sendfail=146` within 2 s. The fallback is
+   gone: the declaration is re-sent (5 tries, 3 s apart) and the wire format stays
+   16 kHz, because every reachable server speaks pcm16 (AD-038) and a dropped ack
+   says nothing about that.
+
+2. **The 100 ms write timeout was sized for the wrong failure.** It was chosen on
+   2026-11-22 to stop a congested uplink from turning the transmit loop into
+   2 frames/s, and it does that. But `esp_websocket_client` serves TLS in *both*
+   directions from one task, so while it drains a downlink burst an uplink write
+   can wait ~105 ms — and the client treats a failed write as **fatal**, tearing
+   the session down mid-transmission. The timeout is now 400 ms: the worst case is
+   ~20 dropped frames of audio, against losing the whole transmission plus a ~5 s
+   reconnect.
+
+Same self-test after both changes:
+
+```
+selftest: keyed 5000 ms
+tx done: frames=256 sendfail=0 readfail=0 send_max=24078 us slow=0
+selftest: unkeyed          (no /WSterminal error, no disconnect)
+```
+
+256 frames in 5 s = 51.2/s, worst write 24 ms, and the session survived.
+
+**Still open:** the capability ack is not landing at all in these runs — the device
+re-sends five times and then keeps 16 kHz by design (device log:
+`no audioCaps reply after 5 asks; staying 16k`). Audio works, but a handshake that
+nobody completes is a bug on one side of the wire, not a setting.

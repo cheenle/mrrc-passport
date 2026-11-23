@@ -485,16 +485,42 @@ void mrrc_net_spectrum_tier(const char *tier)
 const char *mrrc_net_link_tier(void) { return s_link_tier; }
 
 /* Settle the wire format.  Called from the UI tick (5 Hz), which is far more
- * often than needed but costs two comparisons.  A server that never answers
- * would otherwise leave the terminal in AUD_RATE_UNKNOWN for ever — 16 kHz
- * frames out, nothing usable in — so silence is treated as "no", after a grace
- * period long enough for a slow but healthy link to reply. */
+ * often than needed but costs two comparisons.
+ *
+ * 2026-11-24: a missed ack used to set AUD_RATE_48K after 3 s.  That is not a
+ * graceful fallback, it is a bandwidth trap: the 48 kHz tag makes the transmit
+ * path upsample 3:1, so the uplink goes from 32 to ~96 KB/s — on the very link
+ * that was already too slow to deliver one small text frame.  Measured on a
+ * cellular hotspot, that sequence took 2.1 s to fail:
+ *
+ *   selftest: keyed 5000 ms
+ *   transport_base: Poll timeout or error, timeout_ms=100
+ *   websocket_client: esp_transport_write() returned 0
+ *   net: /WSterminal error -> disconnected -> Failed to send the buffer
+ *   tx done: frames=104 sendfail=146 read_max=110 ms
+ *
+ * So silence is no longer treated as "the server is legacy".  The declaration is
+ * simply re-sent (the server's terminal handler ignores a repeat), and the wire
+ * format stays 16 kHz: every reachable server speaks pcm16 (AD-038/AD-039), and
+ * a dropped ack says nothing about that. */
+#define AUD_CAPS_TRIES 5
 void mrrc_net_audio_pump(void)
 {
+    static int tries;
     if (s_aud_rate != AUD_RATE_UNKNOWN || !s_aud_ask_us) return;
     if (esp_timer_get_time() - s_aud_ask_us < 3000000LL) return;   /* 3 s */
-    ESP_LOGW(TAG, "no audioCaps reply in 3 s, falling back to 48k PCM");
-    s_aud_rate = AUD_RATE_48K;
+    s_aud_ask_us = esp_timer_get_time();
+    if (tries >= AUD_CAPS_TRIES) {
+        ESP_LOGW(TAG, "no audioCaps reply after %d asks; staying 16k "
+                      "(a 48k uplink is 3x the bytes and cannot help)", tries);
+        s_aud_rate = AUD_RATE_16K;
+        return;
+    }
+    tries++;
+    ESP_LOGW(TAG, "no audioCaps reply; re-sending declaration (%d/%d)", tries, AUD_CAPS_TRIES);
+    mrrc_net_send_text_stop();     /* no-op if nothing is pending */
+    static const char caps[] = "{\"type\":\"audioCaps\",\"profile\":\"pcm16\"}";
+    if (s_ws) esp_websocket_client_send_text(s_ws, caps, (int)strlen(caps), pdMS_TO_TICKS(200));
 }
 
 /* True while the link is carrying 16 kHz PCM16 (the preferred format). */
@@ -577,8 +603,22 @@ bool mrrc_net_send_bin(const void *data, size_t len)
      * the sender is already 5 frames behind.  Measured on a mobile link
      * 2026-11-22: 71 of 78 sends timed out at 500 ms; the 1 s transport timeout
      * that follows is what tore the websocket down. */
+    /* 400 ms, not 100.  100 ms was chosen on 2026-11-22 to stop a congested
+     * uplink from turning the TX loop into 2 frames/s — and that was right for
+     * the failure it was aimed at.  It is wrong for the failure measured on
+     * 2026-11-24: the websocket client serves TLS in *both* directions from one
+     * task, so while it is draining a downlink burst the uplink write can wait
+     * ~105 ms (`send_max=105269 us`), the 100 ms timeout expires, and
+     * esp_websocket_client treats a failed write as fatal — the whole session is
+     * torn down mid-transmission (`sendfail=137`, `/WSterminal error`, the server
+     * logs "disconnected during TX", and the radio is forced to RX).
+     *
+     * A 400 ms wait costs at most ~20 dropped frames of audio in the worst case.
+     * Losing the session costs the whole transmission plus a ~5 s reconnect.  So
+     * the timeout is sized for "do not kill the socket", and the frame drop
+     * policy stays: a write that still fails is a dropped frame, never a resend. */
     return esp_websocket_client_send_bin(s_ws, (const char *)data, (int)len,
-                                         pdMS_TO_TICKS(100)) >= 0;
+                                         pdMS_TO_TICKS(400)) >= 0;
 }
 
 /* IF filter, as a position on the radio's own ladder.

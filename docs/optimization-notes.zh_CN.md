@@ -935,3 +935,44 @@ NFR-001 仍然开放，直到一次在线会话显示 `err=0 drop=0`、`sps≈16
 `2409:8a00:…`），每一帧都走公网。某个五分钟窗口里下行从 31.2 掉到 10.6 KB/s，而设备
 **54% 空闲**、服务器报 `max pump stall 4817 ms`、丢了 440 帧音频。那是链路限制，不是设备
 限制——也正是 AD-007 预言的情形：目标是优雅降级，不是连续性。
+
+## 26. 发射 2 秒就断：不是链路慢，是写超时被当成致命错误（2026-11-24）
+
+用自动自测开关 + 串口捕获复现，两端在同一时间窗里都看得见。设备侧：
+
+```
+selftest: keyed 5000 ms
+transport_base: Poll timeout or error, timeout_ms=100
+websocket_client: esp_transport_write() returned 0
+net: /WSterminal error -> disconnected -> Failed to send the buffer
+tx done: frames=104 sendfail=146 readfail=0 peak=18633 send_max=109805 us
+```
+
+服务端同一场发射：`Terminal client disconnected during TX! Forcing RX`，而且连
+`TX session` 记录都没留下。
+
+**两个故障，都是自己造的。**
+
+1. **没收到能力应答，把上行放大了 3 倍。** 3 秒内没收到 `audioCaps` 应答时，固件回退到
+   48 kHz PCM，而上行路径要做 3:1 上采样——32 KB/s 变约 96 KB/s，压在一条连一个小文本帧都
+   送不过去的链路上。实测后果：2 秒内 `sendfail=146`。回退已删除：改为重发声明（5 次，间隔
+   3 秒），线格式固定 16 kHz——能连上的服务器都支持 pcm16（AD-038），丢一个应答说明不了别的。
+
+2. **100 ms 的写超时是为了另一个故障定的。** 它 2026-11-22 为"别让拥塞把发射循环拖成
+   2 帧/秒"而设，那一件事它做到了。但 `esp_websocket_client` 的 TLS 收发由同一个任务承担，
+   它正在排空下行突发时，上行写可能等 ~105 ms——而库把写失败当**致命**错误，直接拆会话。
+   现在超时是 400 ms：最坏代价是约 20 帧音频被丢，而不是整场发射丢失加约 5 秒重连。
+
+两处改完，同一自测：
+
+```
+selftest: keyed 5000 ms
+tx done: frames=256 sendfail=0 readfail=0 send_max=24078 us slow=0
+selftest: unkeyed          （没有 /WSterminal error，没有掉线）
+```
+
+5 秒 256 帧 = 51.2 帧/秒，最慢写 24 ms，会话存活。
+
+**仍未解决：** 这几轮里能力应答根本没落地——设备重发 5 次后按设计保持 16 kHz（日志：
+`no audioCaps reply after 5 asks; staying 16k`）。音频是通的，但一个没人完成的握手是线缆某一端
+的 bug，不是一个设置项。
