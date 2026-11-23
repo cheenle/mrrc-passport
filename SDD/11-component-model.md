@@ -13,9 +13,9 @@ what actually changes.
 | Module | Lines | Responsibility | Invariant it must hold |
 | --- | ---: | --- | --- |
 | `main/app_main.c` | 673 | boot order, key task, settings load/save, mode/volume wiring | boot order is load-then-connect: nothing is sent before settings are known |
-| `main/mrrc_net.c` | 1 067 | Wi-Fi selection, session, WS client, control JSON, channel dispatch, uplink writes | one socket; a failed uplink write never tears the session down; spectrum is dropped before uplink is delayed |
+| `main/mrrc_net.c` | 1 120 | Wi-Fi selection, session, WS client, control JSON, channel dispatch, uplink writes | one socket; a failed uplink write never tears the session down (a frame gets 400 ms, a timeout sized so the client does not abort); reconnect waits 500 ms, not seconds |
 | `main/mrrc_ui.c` | 869 | all LVGL: header, frequency, S-meter, trace, waterfall, chips, battery | the only file that may call `lv_*`; `heat_init()` before any palette consumer |
-| `main/mrrc_audio.c` | 397 | I2S init, playback ring, 20 ms framing, pre-buffer gate, counters | 16 kHz forever; no heap; a frame is dropped rather than waited for |
+| `main/mrrc_audio.c` | 430 | I2S init, playback ring, 20 ms framing, pre-buffer band + governor, counters | 16 kHz forever; no heap; the cushion stays inside 128–384 ms; a frame is dropped rather than waited for |
 | `main/mrrc_tx.c` | 217 | uplink framing and PTT sequencing | release is one write and never blocks |
 | `main/mrrc_prov.c` | 174 | SoftAP, provisioning page, save path | a failed save is reported, never silent |
 | `main/mrrc_cfg.c` | 131 | settings precedence (NVS over Kconfig), the `"mrrc"` namespace | every key has exactly one owner module |

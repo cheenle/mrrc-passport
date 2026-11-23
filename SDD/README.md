@@ -74,7 +74,7 @@ named in `08` and the server is cited as the owner.
 | Attribute | Value |
 | --- | --- |
 | Document ID | SDD-MRRC-PASSPORT-2026-001 |
-| SDD Version | V1.0 (all 13 applicable chapters written) |
+| SDD Version | V1.1 (13 chapters; 2026-11-24 measurement round folded in) |
 | Baseline Date | 2026-11-23 |
 | Hardware | FoloToy AI Passport: ESP32-C3 rev v1.1, 160 MHz single core, 400 KB SRAM, no PSRAM, 8 MB flash, 240×320 ST7789, ES8311 codec |
 | Verified unit | MAC `98:c3:77:f5:4b:2c`, `/dev/ttyACM0` |

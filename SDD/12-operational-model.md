@@ -48,7 +48,7 @@ attributed rather than guessed.
 | --- | --- | --- |
 | login fails | retry with exponential backoff, capped | start **30 s**, double, cap **600 s**, reset on success |
 | login succeeds, cached token rejected | "no control link with cached token" → discard token, re-login | wait **12 s** for the socket before concluding |
-| socket drops on its own | let the client reconnect | client reconnect timeout **3 000 ms** |
+| socket drops on its own | let the client reconnect | client reconnect **500 ms** plus the TLS handshake (~1.3 s); this is the delay an operator hears after a failed transmission |
 | socket still down | destroy and rebuild the session, re-login | after **20 s** down |
 | net task loop | poll state, service the queue | every **3 000 ms** |
 

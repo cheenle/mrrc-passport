@@ -28,7 +28,7 @@ frame — that inversion is what makes a jitter ring necessary in the first plac
 | Buffer | Size | Where | Why this size |
 | --- | ---: | --- | --- |
 | playback ring `s_rb` | 16 384 B (~0.51 s @16 kHz) | `mrrc_audio.c` | measured: the session-start burst dropped 253 frames with 8 KB, 0 with 16 KB (`docs/design-v1.md` 4.4) |
-| pre-buffer threshold | 5 120 B (~160 ms) | `mrrc_audio.c` | arrival gaps p99 230–299 ms, so a smaller cushion starves on every burst |
+| pre-buffer band | floor 4 096 B (~128 ms), ceiling 12 288 B (~384 ms) | `mrrc_audio.c` | the gate used to be one-shot and the ring then drifted to 98% full (measured 2026-11-23); it is now a controller — trim the front above the ceiling, repeat the last frame below the floor |
 | re-buffer trigger | dry for 200 ms | `mrrc_audio.c` | rebuilds the cushion after a real outage without looping |
 | LVGL draw buffer | 240 × 24 lines, single | `bsp_display_lvgl.c` | 8 lines → 58% CPU, 12 → 43–49%, 32 → `largest` 18 KB (too little) |
 | waterfall | 10 624 B (palette 1 024 + indices 9 600) | `mrrc_ui.c` | AD-005; was 19 200 B as RGB565 |
@@ -66,7 +66,13 @@ These are the four that have bitten this codebase, stated as invariants:
 3. **The keyed socket carries one direction.** While this terminal holds the PTT,
    no downlink audio arrives on that socket (AD-004) and the firmware must not
    assume otherwise in either direction.
-4. **Nothing in the audio or transmit path allocates.** Buffers are static; the RW
+4. **The jitter cushion is controlled, not merely gated.** The pre-buffer decides
+   when playback *starts*; a governor decides where it *stays*: above the ceiling
+   the oldest frames are trimmed, below the floor the last frame is repeated for
+   20 ms rather than handing the DMA an empty buffer (an empty write stops pacing
+   the loop, which is how one gap became a burst of underruns). Counted as
+   `gov(ins=… trim=…)`.
+5. **Nothing in the audio or transmit path allocates.** Buffers are static; the RW
    path runs on a fixed budget and a heap call in a 50 Hz loop is how `largest`
    becomes 12 KB of fragments.
 

@@ -17,7 +17,7 @@ Regenerate: `python3 .agents/skills/sdd-guardian/harness/sdd_context.py catalog`
 | --- | --- | --- | --- |
 | `secrets-in-tracked-config` | Wi-Fi and server credentials never enter a tracked file | `main/**`, `sdkconfig.defaults`, `sdkconfig.defaults.*`, `tools/**` | AGENTS §5; docs/development/engineering/environment-setup.md |
 | `palette-before-heat-init` | heat_init() runs before anything reads the palette | `main/mrrc_ui.c` | docs/UI.md §2; docs/optimization-notes.md waterfall palette |
-| `uplink-send-timeout` | The uplink frame timeout stays at or below 200 ms | `main/mrrc_net.c`, `main/mrrc_net.h` | docs/transport-tuning.md §6 |
+| `uplink-send-timeout` | The uplink frame timeout stays at or below 500 ms | `main/mrrc_net.c`, `main/mrrc_net.h` | docs/transport-tuning.md §6 |
 | `single-terminal-endpoint` | One socket: /WSterminal, never the four-endpoint layout | `main/**` | docs/transport-tuning.md §6; docs/optimization-notes.md §2 |
 | `no-opus-in-firmware` | PCM16 only — there is no Opus decoder in this image | `main/**` | docs/optimization-notes.md §2.1 (measured, 24 KB + 60% CPU) |
 | `nvs-single-namespace` | Every NVS handle opens the "mrrc" namespace | `main/**` | main/mrrc_cfg.c (namespace mrrc); docs/provisioning.md 'Why NVS over Kconfig' |

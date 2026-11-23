@@ -140,7 +140,7 @@ resamples onward.
 | --- | --- |
 | Type | Design / Reliability |
 | Status | Implemented, field-exercised (2026-11-22) |
-| Decision | Device: the per-frame uplink write timeout is 100 ms. Server: a socket that holds the PTT receives **no** downlink audio. Both halves are required; either one alone does not fix the fault. |
+| Decision | Device: the per-frame uplink write timeout is 400 ms (100 ms until 2026-11-24, see the amendment). Server: a socket that holds the PTT receives **no** downlink — audio *and* spectrum. Both halves are required; either one alone does not fix the fault. |
 
 **Problem.** "The PTT releases itself after a few seconds" was diagnosed as a key
 fault three times. The button log says otherwise: one press held 16.5 s with no
@@ -188,6 +188,28 @@ device drops a frame it cannot write in 100 ms.
   coupling legible at the call site.
 
 ---
+
+**Amendment (2026-11-24): 100 ms became 400 ms, and the waterfall yields too.**
+
+Two measurements forced this, both from the same afternoon:
+
+1. **The spectrum tier was never gated.** AD-004 suppressed the *audio* downlink
+   for a keyed socket but the spectrum fan-out kept enqueuing 1701-byte frames on
+   the same TCP that carries the 32 KB/s uplink. Result: `Terminal client
+   disconnected during TX! Forcing RX` at the tier change, with no session record
+   left behind. The keyed socket now gets neither audio nor spectrum.
+2. **A 100 ms write timeout is shorter than the pause it was meant to survive.**
+   `esp_websocket_client` serves TLS in both directions from one task, so while it
+   drains a downlink burst an uplink write can wait ~105 ms — and the client treats
+   a failed write as fatal, tearing the session down mid-transmission
+   (`sendfail=146` in 2 s, `send_max=109805 us`). At 400 ms the same test finishes
+   with `frames=256 sendfail=0 send_max=24078 us` and no disconnect. The cost of
+   the longer timeout is bounded: ~20 dropped frames in the worst case, against a
+   lost transmission plus a ~5 s reconnect.
+
+The original reasoning for 100 ms still holds (a frame that cannot be written in
+100 ms cannot be followed by the next four either) — what it missed is that the
+*client* punishes the failure far harder than the link does.
 
 ## AD-005: Waterfall as 8-bit palette indices
 
@@ -336,11 +358,11 @@ tuning taps, so it is indistinguishable from tuning by design.
 | AD-001 | One `/WSterminal` session, channel-prefixed frames | NFR-024 | `../docs/transport-tuning.md` §6 |
 | AD-002 | PCM16 only, no Opus in this image | NFR-025 | `../docs/optimization-notes.md` §2.1 |
 | AD-003 | Codec fixed at 16 kHz, no runtime reconfiguration | NFR-027 | `../docs/design-v1.md` §3.1–3.2 |
-| AD-004 | 100 ms uplink timeout plus server-side half duplex | NFR-004, NFR-005, NFR-015 | `../docs/transport-tuning.md` §4, §6 |
+| AD-004 | 400 ms uplink timeout plus server-side half duplex | NFR-004, NFR-005, NFR-015 | `../docs/transport-tuning.md` §4, §6, §26 |
 | AD-005 | Waterfall stored as 8-bit palette indices | NFR-022 | `../docs/optimization-notes.md` §20 |
 | AD-006 | NVS over Kconfig for provisioning | NFR-030 | `../docs/provisioning.md` |
 | AD-007 | Three networks, switch on audio health | NFR-008, NFR-010 | `../docs/optimization-notes.md` §22–§23 |
-| AD-008 | Knob reports six positions as OK double-clicks | — (UI) | `../docs/UI.md`, measured 250–420 ms |
+| AD-008 | Knob reports seven positions as OK double-clicks (brightness added 2026-11-24) | NFR-032 | `../docs/UI.md`, measured 250–420 ms |
 
 **Amendment (2026-11-24): a seventh position, screen brightness.** The cycle is
 now `FREQ → CH → VOL → MIC → STEP → FIL → BL`.  The panel's backlight is a LEDC
