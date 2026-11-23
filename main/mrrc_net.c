@@ -1029,7 +1029,16 @@ static void start_ws(void)
         .headers = s_auth_hdr,
         .buffer_size = WS_BUF_SIZE,
         .task_stack = WS_TASK_STACK,
-        .reconnect_timeout_ms = 3000,
+        /* 500 ms, not 3000.  The interval only decides how long the device
+         * waits before *trying* again after the socket dies; the operator hears
+         * the gap.  Measured 2026-11-24: when a transmit kills the socket (see
+         * the 400 ms write timeout note above and the esp_tls
+         * "Connection already in progress" abort), RX audio came back 4.5 s
+         * after the unkey — of which 1 s was the server forcing RX and the rest
+         * was this reconnect delay plus the TLS handshake.  A dead socket during
+         * TX is already a lost transmission; it should not also cost the
+         * listener five seconds of silence afterwards. */
+        .reconnect_timeout_ms = 500,
         .network_timeout_ms = 10000,
         .ping_interval_sec = 15,
         .pingpong_timeout_sec = 25,
