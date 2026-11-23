@@ -341,3 +341,13 @@ tuning taps, so it is indistinguishable from tuning by design.
 | AD-006 | NVS over Kconfig for provisioning | NFR-030 | `../docs/provisioning.md` |
 | AD-007 | Three networks, switch on audio health | NFR-008, NFR-010 | `../docs/optimization-notes.md` §22–§23 |
 | AD-008 | Knob reports six positions as OK double-clicks | — (UI) | `../docs/UI.md`, measured 250–420 ms |
+
+**Amendment (2026-11-24): a seventh position, screen brightness.** The cycle is
+now `FREQ → CH → VOL → MIC → STEP → FIL → BL`.  The panel's backlight is a LEDC
+PWM channel (`bsp_display.c: backlight_init`, GPIO21), and `bsp_display_backlight(0..100)`
+already existed — it was simply hard-coded to 70 % at boot, so the one thing an
+operator asked for after "make it louder" was the only knob they could not reach.
+Brightness is stored in NVS like volume (`mrrc/bright`), because a display that
+must be re-dimmed after every battery change is a display nobody dims.  Default 70 %
+keeps the measured current draw; the floor is 5 % so a mistaken notch cannot
+leave a black screen with no way back.

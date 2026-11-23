@@ -630,7 +630,8 @@ static void refresh(void)
                       : s_ui_mode == UI_MODE_MIC    ? "MIC"
                       : s_ui_mode == UI_MODE_STEP   ? "STEP"
                       : s_ui_mode == UI_MODE_FILTER ? "FIL"
-                      : s_ui_mode == UI_MODE_CHANNEL ? "CH" : "FREQ";
+                      : s_ui_mode == UI_MODE_CHANNEL ? "CH"
+                      : s_ui_mode == UI_MODE_BRIGHT ? "BL" : "FREQ";
         if (strcmp(m, lv_label_get_text(s_chip_mode)) != 0) {
             lv_label_set_text(s_chip_mode, m);
         }
@@ -651,7 +652,7 @@ static void refresh(void)
 
         /* Leftmost plate carries whatever the knob is pointed at — band name in
          * FREQ mode, channel name in CH, speaker level in VOL. */
-        if (s_ui_mode == UI_MODE_VOL) {
+        if (s_ui_mode == UI_MODE_VOL || s_ui_mode == UI_MODE_BRIGHT) {
             snprintf(b, sizeof b, "%d%%", s_mode_value);
             label_set_if_changed(s_bandplate, b);
         } else if (s_ui_mode == UI_MODE_MIC) {

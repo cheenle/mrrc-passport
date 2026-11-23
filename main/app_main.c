@@ -52,6 +52,13 @@ static QueueHandle_t s_key_q;
 #define SPK_STEP 5
 #define VOL_DEFAULT 60
 static int s_spk_vol = VOL_DEFAULT;
+/* Screen backlight, 0..100 %.  The panel's BL pin is on a LEDC channel
+ * (bsp_display.c: backlight_init), so this is real PWM, not a fake dim.  Kept in
+ * NVS like volume: a display that has to be re-dimmed after every battery change
+ * is a display nobody dims. */
+static int s_bright = 70;
+#define BRIGHT_MIN 5
+#define BRIGHT_STEP 5
 static ui_mode_t s_ui_mode = UI_MODE_FREQ;
 
 /* Knob settings that outlive a reboot.  STEP is what FREQ mode adds per click;
@@ -102,6 +109,7 @@ static const char *mode_name(ui_mode_t m)
         case UI_MODE_MIC:     return "MIC";
         case UI_MODE_STEP:    return "STEP";
         case UI_MODE_FILTER:  return "FIL";
+        case UI_MODE_BRIGHT:  return "BL";
         default:              return "FREQ";
     }
 }
@@ -113,6 +121,7 @@ static int mode_value(ui_mode_t m)
         case UI_MODE_MIC:    return bsp_audio_get_mic_gain_db();
         case UI_MODE_STEP:   return s_step_hz;
         case UI_MODE_FILTER: return s_filter_hz;
+        case UI_MODE_BRIGHT: return s_bright;
         default:             return s_spk_vol;
     }
 }
@@ -137,6 +146,16 @@ static void vol_load(void)
     if (v > 100) v = 100;
     s_spk_vol = (int)v;
 
+    int32_t br = 70;
+    if (nvs_open("mrrc", NVS_READONLY, &h) == ESP_OK) {
+        (void)nvs_get_i32(h, "bright", &br);
+        nvs_close(h);
+    }
+    if (br < BRIGHT_MIN) br = BRIGHT_MIN;
+    if (br > 100) br = 100;
+    s_bright = (int)br;
+    bsp_display_backlight((uint8_t)s_bright);
+
     /* Microphone PGA survives a reboot too: an operator who raised it to be
      * heard on a weak signal should not have to rediscover the setting. */
     int32_t g = bsp_audio_get_mic_gain_db();
@@ -157,8 +176,8 @@ static void vol_load(void)
     }
     for (int i = 0; i < STEP_COUNT; i++)   if (STEP_HZ[i] == st)   { s_step_idx = i;   s_step_hz = STEP_HZ[i]; }
     for (int i = 0; i < FILTER_COUNT; i++) if (FILTER_HZ[i] == fi) { s_filter_idx = i; s_filter_hz = FILTER_HZ[i]; }
-    ESP_LOGI(TAG, "knob: vol=%d%% mic=%d dB step=%d Hz filter=%d Hz",
-             s_spk_vol, bsp_audio_get_mic_gain_db(), s_step_hz, s_filter_hz);
+    ESP_LOGI(TAG, "knob: vol=%d%% mic=%d dB step=%d Hz filter=%d Hz bright=%d%%",
+             s_spk_vol, bsp_audio_get_mic_gain_db(), s_step_hz, s_filter_hz, s_bright);
 }
 
 static void settings_store(void)
@@ -166,6 +185,7 @@ static void settings_store(void)
     nvs_handle_t h;
     if (nvs_open("mrrc", NVS_READWRITE, &h) != ESP_OK) return;
     (void)nvs_set_i32(h, "spk_vol", s_spk_vol);
+    (void)nvs_set_i32(h, "bright", s_bright);
     (void)nvs_set_i32(h, "mic_gain", bsp_audio_get_mic_gain_db());
     (void)nvs_set_i32(h, "step_hz", s_step_hz);
     (void)nvs_set_i32(h, "filter_hz", s_filter_hz);
@@ -222,6 +242,16 @@ static void knob_step(bsp_btn_t btn)
         ESP_LOGI(TAG, "filter -> %d Hz (index %d%s)", s_filter_hz, fi,
                  mode_is_narrow() ? ", narrow" : "");
         settings_store();
+        return;
+    }
+
+    if (s_ui_mode == UI_MODE_BRIGHT) {
+        s_bright += dir * BRIGHT_STEP;
+        if (s_bright < BRIGHT_MIN) s_bright = BRIGHT_MIN;
+        if (s_bright > 100) s_bright = 100;
+        bsp_display_backlight((uint8_t)s_bright);
+        mrrc_ui_set_mode(s_ui_mode, s_bright);
+        settings_store();            /* one NVS commit per notch, as for volume */
         return;
     }
 

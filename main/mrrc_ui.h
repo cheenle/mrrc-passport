@@ -28,7 +28,8 @@ typedef enum {
     UI_MODE_MIC = 3,
     UI_MODE_STEP = 4,     /* tuning step: 1K / 5K / 25K */
     UI_MODE_FILTER = 5,   /* IF filter: 1.8K / 2.4K / 2.7K / 3.0K */
-    UI_MODE_COUNT = 6
+    UI_MODE_BRIGHT = 6,   /* screen backlight: PWM on the panel's BL pin */
+    UI_MODE_COUNT = 7
 } ui_mode_t;
 void mrrc_ui_set_mode(ui_mode_t mode, int volume_pct);
 

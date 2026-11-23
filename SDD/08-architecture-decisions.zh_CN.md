@@ -276,3 +276,9 @@ RTT 峰值 6–10 秒**。直觉代理量 RSSI 被实测证伪：一个 **−25 
 | AD-006 | 配网写 NVS 而非 Kconfig | NFR-030 | `../docs/provisioning.md` |
 | AD-007 | 三个网络，按音频健康度切换 | NFR-008、NFR-010 | `../docs/optimization-notes.md` §22–§23 |
 | AD-008 | 旋钮六档以 OK 双击上报 | —（UI） | `../docs/UI.md`，实测 250–420 ms |
+
+**修订（2026-11-24）：第七档 —— 屏幕亮度。** 循环现在是 `FREQ → CH → VOL → MIC → STEP → FIL → BL`。
+面板背光本来就是一个 LEDC PWM 通道（`bsp_display.c: backlight_init`，GPIO21），
+`bsp_display_backlight(0..100)` 也早就存在——只是开机写死 70%，于是操作者在"再响一点"之后
+唯一够不着的旋钮就是它。亮度像音量一样存 NVS（`mrrc/bright`）：换一次电池就要重调的显示，
+等于没有人会去调。默认 70%（保持实测功耗），下限 5%，免得误转一档变成黑屏且无法转回来。
