@@ -112,3 +112,14 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 #   esp_wifi_init() 直接 ESP_ERR_NO_MEM，设备无限重启。
 # 若要恢复该性能选项，必须先把 lvgl 钉到 9.5.*，并重新验证启动堆。
 # CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM is not set
+
+# --- HTTP: the setup page must survive a real phone's headers ----------------
+# httpd's default request-header budget is 512 B. A phone browser sends a long
+# User-Agent plus sec-ch-ua / sec-fetch-* / Accept-* / cookies and trips
+# 431 "Header fields are too long" on the very page that exists to configure the
+# device — a dead end, because the device has no keyboard to fall back on.
+# (Found in the field 2026-11-24 on the setup AP: the page never rendered.)
+# This was already bumped in a local sdkconfig once, which is exactly why it
+# belongs here: a build from the defaults regressed it silently.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+CONFIG_HTTPD_MAX_URI_LEN=1024
