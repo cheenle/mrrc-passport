@@ -154,13 +154,21 @@ static void rb_put(const uint8_t *d, size_t n)
      * what survives is the freshest audio *and* the next fan-out tick fits.
      * Stopping one frame below the ceiling is what pinned the ring at 98 % and
      * made every tick overflow (measured 2026-11-24). */
-    const size_t trim_to = s_hi > AUD_TICK_BYTES ? s_hi - AUD_TICK_BYTES : s_hi;
-    while (s_used > trim_to && s_used >= 2) {
-        const size_t len = (size_t)((s_rb[s_r] << 8) | s_rb[(s_r + 1) % AUD_RB_BYTES]);
-        if (len + 2 > s_used) break;
-        s_r = (s_r + 2 + len) % AUD_RB_BYTES;
-        s_used -= len + 2;
-        s_trims++;
+    /* Only when the ring is actually OVER the ceiling.  The previous version
+     * compared against (ceiling - one tick) directly, so every incoming frame
+     * while the ring sat above 8 704 B — i.e. most of the time — trimmed one
+     * frame: measured 153 trims in a minute, each a 20 ms hole, heard as the
+     * "occasional stutter".  The headroom is for *after* an overflow, not a
+     * threshold to hover around. */
+    if (s_used > s_hi) {
+        const size_t trim_to = s_hi > AUD_TICK_BYTES ? s_hi - AUD_TICK_BYTES : s_hi;
+        while (s_used > trim_to && s_used >= 2) {
+            const size_t len = (size_t)((s_rb[s_r] << 8) | s_rb[(s_r + 1) % AUD_RB_BYTES]);
+            if (len + 2 > s_used) break;
+            s_r = (s_r + 2 + len) % AUD_RB_BYTES;
+            s_used -= len + 2;
+            s_trims++;
+        }
     }
     if (AUD_RB_BYTES - s_used < n + 2) {
         /* Full.  Which end to sacrifice depends on why it is full.
