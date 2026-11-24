@@ -28,7 +28,7 @@ frame — that inversion is what makes a jitter ring necessary in the first plac
 | Buffer | Size | Where | Why this size |
 | --- | ---: | --- | --- |
 | playback ring `s_rb` | 16 384 B (~0.51 s @16 kHz) | `mrrc_audio.c` | measured: the session-start burst dropped 253 frames with 8 KB, 0 with 16 KB (`docs/design-v1.md` 4.4) |
-| pre-buffer band | floor 4 096 B (~128 ms), ceiling 12 288 B (~384 ms) | `mrrc_audio.c` | the gate used to be one-shot and the ring then drifted to 98% full (measured 2026-11-23); it is now a controller — trim the front above the ceiling, repeat the last frame below the floor |
+| pre-buffer band | floor 4 096 B (~128 ms), ceiling 12 288 B adapting up to 14 336 B | `mrrc_audio.c` | the gate used to be one-shot and the ring then drifted to 98% full (measured 2026-11-23); it is now a controller — trim the front to `ceiling - one tick` above the band, repeat the last frame when it runs dry, and widen the ceiling by 1 KB a minute while trims outnumber repeats (measured: that took trims from 1.3/s to ~0) |
 | re-buffer trigger | dry for 200 ms | `mrrc_audio.c` | rebuilds the cushion after a real outage without looping |
 | LVGL draw buffer | 240 × 24 lines, single | `bsp_display_lvgl.c` | 8 lines → 58% CPU, 12 → 43–49%, 32 → `largest` 18 KB (too little) |
 | waterfall | 10 624 B (palette 1 024 + indices 9 600) | `mrrc_ui.c` | AD-005; was 19 200 B as RGB565 |

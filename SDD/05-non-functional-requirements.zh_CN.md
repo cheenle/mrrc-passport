@@ -14,7 +14,7 @@
 
 | ID | 需求 | 目标 | 优先级 | 验证 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| NFR-001 | 接收播放连续性 | 13 分钟 soak 内环形空唤醒 ≤2 次/秒；re-buffer 计数不再增长 | 关键 | 每分钟的 `link: … underruns=` 加 `gov(ins/trim)` 计数。2026-11-23：环被钉在 98% 时是 0–18/s；时钟修正 + 带内控制器之后**每个采样都是 0**，101 分钟会话只修剪掉 0.84% 的帧 | field-exercised |
+| NFR-001 | 接收播放连续性 | 13 分钟 soak 内环形空唤醒 ≤2 次/秒；re-buffer 计数不再增长 | 关键 | 每分钟的 `link: … underruns=` 加 `gov(ins/trim)` 计数。2026-11-23：环被钉在 98% 时是 0–18/s；时钟修正 + 带内控制器 + 自适应天花板之后（2026-11-24）**每个采样都是 0**，6 分钟样本里只有 0.3% 的帧被动过（原为 4.4%） | field-exercised |
 | NFR-002 | 接收帧率 | 持续 50.0 帧/秒（20 ms 一帧），`drop=0`，`i2s` 节拍不出现超过一帧的空档 | 关键 | idle 行的 `tx: keys=… frames=…` 与 `i2s …/s` 计数 | field-exercised |
 | NFR-003 | 下行吞吐 | 健康 AP 上 ≥31.3 KB/s 音频、总流量 ≥49 KB/s——与同一 AP 的参考客户端相同 | 高 | 同一窗口的参考客户端；`ws: total=…` | field-exercised |
 | NFR-004 | 发射期上行节拍 | 整个发射期间 50 帧/秒；`sendfail=0`；`readfail=0` | 关键 | `tx done: frames=… sendfail=… readfail=…`——30.5 秒实测 `frames=1500 sendfail=0` | field-exercised |

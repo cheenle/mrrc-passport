@@ -1096,3 +1096,50 @@ selftest: unkeyed          (no /WSterminal error, no disconnect)
 re-sends five times and then keeps 16 kHz by design (device log:
 `no audioCaps reply after 5 asks; staying 16k`). Audio works, but a handshake that
 nobody completes is a bug on one side of the wire, not a setting.
+
+## 27. The cushion adapts itself: trims went to zero (2026-11-24)
+
+The "occasional stutter" in receive had a number after all. Six minutes of the
+idle line, differenced per minute:
+
+| minute | `i2s` | ring | `ins` | `trim` |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 40.7 | 3 210 | +2 | +0 |
+| 2 | 49.8 | 10 914 | +13 | +1 |
+| 3 | 49.5 | 12 198 | +26 | +32 |
+| 4 | 49.3 | 9 630 | +39 | +40 |
+| 5 | 47.5 | 11 556 | +57 | +153 |
+| 6 | 46.9 | 10 272 | +146 | +167 |
+
+1.3 trims and 0.9 repeats per second — **4.4 % of the stream tampered with 20 ms
+at a time**. The ring never sat mid-band; it sat *at* the 12 288 B ceiling
+(9.6–12.2 KB), so every fan-out tick overflowed by construction.
+
+Cause: the server sends audio in ticks (measured `blocks/s=10, offered/s=50` — five
+20 ms blocks per 100 ms). A ring that is AT the ceiling has no room for the next
+tick, so it trims on every tick; then it drains below the floor between ticks and
+repeats.
+
+Two changes in `mrrc_audio.c`:
+
+1. **Trim with headroom.** On overflow, come down to `ceiling - 3 584 B` (one tick
+   plus margin) instead of stopping one frame below the ceiling.
+2. **Adapt the ceiling.** Once a minute: trims > repeats and trims > 20 → widen by
+   1 KB (max 14 336); repeats > 20 → narrow by 512 B (min 8 192). Every change is
+   logged, because an adaptive threshold nobody can reconstruct afterwards is a
+   rumour machine.
+
+After, same measurement (three minutes):
+
+```
+i2s(49.9 f/s)  ring(6420-7704/16384 max 8988)  un=0  gov(ins=19 trim=0)
+i2s(49.9 f/s)  ring(7704/16384 max 8988)       un=0  gov(ins=25 trim=4)
+```
+
+`trim` ≈ 0 and `ins` ≈ 0.1/s: 0.3 % of frames, down from 4.4 %. The ring now sits
+mid-band instead of pinned, which is what the design always claimed it did.
+
+**Boundary.** This did not change the *supply*: one 531-second server session in
+the same period reported `dropped 1217 (24.3 s)` — 4.6 % of audio never left the
+box, which the cushion cannot invent back. With the cushion fixed, that number is
+now the only remaining explanation for a stutter, and it lives on the server side.

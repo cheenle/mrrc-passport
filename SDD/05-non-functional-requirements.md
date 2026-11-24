@@ -17,7 +17,7 @@ real unit over a sustained run; `implemented` means measured on the bench only;
 
 | ID | Requirement | Target | Priority | Verification | Status |
 | --- | --- | --- | --- | --- | --- |
-| NFR-001 | Receive playback continuity | Ring-underrun wakeups ≤2/s over a 13-minute soak; no re-buffer growth | Critical | `link: … underruns=` per minute plus the `gov(ins/trim)` counters. 2026-11-23: 0–18/s with the ring pinned at 98%; after the clock fix and the banded governor, **0 on every sample** and 0.84% frames trimmed over a 101-minute session | field-exercised |
+| NFR-001 | Receive playback continuity | Ring-underrun wakeups ≤2/s over a 13-minute soak; no re-buffer growth | Critical | `link: … underruns=` per minute plus the `gov(ins/trim)` counters. 2026-11-23: 0–18/s with the ring pinned at 98%; after the clock fix, the banded governor and its adaptive ceiling (2026-11-24), **0 on every sample** and 0.3% of frames touched (was 4.4%) over a six-minute sample | field-exercised |
 | NFR-002 | Receive frame rate | 50.0 frames/s sustained (20 ms frames), `drop=0`, `i2s` cadence never gaps longer than one frame | Critical | `tx: keys=… frames=…` idle line and the `i2s …/s` counter | field-exercised |
 | NFR-003 | Downlink throughput | ≥31.3 KB/s audio and ≥49 KB/s total on a healthy access point — equal to a reference client on the same AP | High | Reference client in the same window; `ws: total=…` | field-exercised |
 | NFR-004 | Uplink cadence during transmit | 50 frames/s for the whole transmission; `sendfail=0`; `readfail=0` | Critical | `tx done: frames=… sendfail=… readfail=…` — 30.5 s run: `frames=1500 sendfail=0` | field-exercised |

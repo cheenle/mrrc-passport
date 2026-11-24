@@ -64,12 +64,25 @@ static const char *TAG = "audio";
  *    and the consumer free-runs through the whole 14 KB, so one network gap
  *    becomes a burst of underruns and a re-buffer.
  *
- * So the cushion is now bounded above: trim back to HI when a recovery burst
- * pushes past it (384 ms ceiling), and hold the pace with a repeated frame
- * when the ring runs dry instead of letting the writer free-run.  The floor is
- * the ring itself — it drains one 20 ms frame per write — so a low-water
- * repeat would only start earlier without buying any more slack. */
-#define AUD_HI_BYTES   12288        /* ~384 ms: trim above this */
+ * So the cushion is bounded on both sides, and the ceiling adapts.  Measured
+ * 2026-11-24 over six minutes: the ring sat *pinned at the ceiling* (9.6-12.2 KB
+ * of 12 288) trimming 1.3 frames/s and repeating 0.9 frames/s — 4.4 % of the
+ * stream tampered with 20 ms at a time, which is the "occasional stutter" the
+ * operator reports.  Cause: the server fans out in ticks (measured
+ * `blocks/s=10 offered/s=50`, i.e. five 20 ms blocks per 100 ms tick), so a ring
+ * that sits AT the ceiling cannot absorb the next tick — it overflows every time.
+ *
+ * Two changes:
+ *   1. trim with headroom: on overflow come down far enough to hold one whole
+ *      tick (5 frames + margin), so the following ticks land inside the band;
+ *   2. adapt the ceiling: if trims still dominate a minute, widen by 1 KB; if
+ *      repeats dominate, narrow by 512 B (that direction means starvation, where
+ *      a wider band would only buy latency).  Both edges stay inside the ring. */
+#define AUD_TICK_BYTES   3584       /* one fan-out tick (~5 x 641 B) + margin */
+static size_t s_hi = 12288;         /* ~384 ms: trim above this */
+static size_t s_lo = 4096;          /* ~128 ms: the cushion we try to keep */
+#define AUD_HI_MAX      14336
+#define AUD_HI_MIN       8192
 /* A mobile link (a phone hotspot on a train, say) stalls for seconds: measured
  * 12% loss with RTT peaks of 3-10 s.  No feasible ring covers that, so do not
  * try — when the stream goes quiet this long, the audio already queued is stale
@@ -137,11 +150,12 @@ static void rb_put(const uint8_t *d, size_t n)
      * below one frame period, so a retry cannot make the stream late. */
     if (xSemaphoreTake(s_rb_mtx, pdMS_TO_TICKS(2)) != pdTRUE) { s_drops++; s_drop_lock++; return; }
     /* High water: a recovery burst must not leave half a second of latency
-     * behind.  Trim from the front (oldest) down to AUD_HI_BYTES, so what
-     * survives is the freshest audio and the cushion stays where the design
-     * wants it.  This replaced the old "only when completely full" trim, which
-     * pinned the ring at 98% and never brought it back. */
-    while (s_used > AUD_HI_BYTES && s_used >= 2) {
+     * behind.  Trim from the front (oldest) down to (ceiling - one tick), so
+     * what survives is the freshest audio *and* the next fan-out tick fits.
+     * Stopping one frame below the ceiling is what pinned the ring at 98 % and
+     * made every tick overflow (measured 2026-11-24). */
+    const size_t trim_to = s_hi > AUD_TICK_BYTES ? s_hi - AUD_TICK_BYTES : s_hi;
+    while (s_used > trim_to && s_used >= 2) {
         const size_t len = (size_t)((s_rb[s_r] << 8) | s_rb[(s_r + 1) % AUD_RB_BYTES]);
         if (len + 2 > s_used) break;
         s_r = (s_r + 2 + len) % AUD_RB_BYTES;
@@ -212,7 +226,26 @@ static void audio_task(void *arg)
     (void)arg;
     static uint8_t frame[AUD_FRAME_MAX];
 
+    /* Governor window: evaluated once a minute from the same counters the idle
+     * line prints, so every change is explainable afterwards. */
+    uint32_t g_ins_prev = 0, g_trim_prev = 0;
+    int64_t  g_eval_us = esp_timer_get_time();
+
     for (;;) {
+        if (esp_timer_get_time() - g_eval_us > 60000000LL) {
+            const uint32_t d_ins = s_inserts - g_ins_prev;
+            const uint32_t d_trim = s_trims - g_trim_prev;
+            g_ins_prev = s_inserts; g_trim_prev = s_trims; g_eval_us = esp_timer_get_time();
+            const size_t hi0 = s_hi;
+            if (d_trim > d_ins && d_trim > 20) {
+                if (s_hi + 1024 <= AUD_HI_MAX) s_hi += 1024;
+            } else if (d_ins > 20 && s_hi >= AUD_HI_MIN + 1024) {
+                s_hi -= 512;
+            }
+            if (s_hi != hi0)
+                ESP_LOGI(TAG, "cushion ceiling %u -> %u B (ins=%u trim=%u per min)",
+                         (unsigned)hi0, (unsigned)s_hi, (unsigned)d_ins, (unsigned)d_trim);
+        }
         /* Accumulate a cushion before the first write, and rebuild it after a
          * sustained dry spell.  Without this the DMA is fed frame-by-frame from
          * an almost empty ring and every network gap is heard as a dropout. */
