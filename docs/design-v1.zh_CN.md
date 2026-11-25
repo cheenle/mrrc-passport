@@ -246,6 +246,7 @@ ES8311 的输入 PGA 是**阶梯的**，不是连续可调：
 | OK 双击 | 切换 FREQ / VOL 档 |
 | UP / DOWN 单击 | FREQ 档：±1 kHz；VOL 档：喇叭音量 ±5% |
 | UP / DOWN 长按 | 连发（450 ms 后每 120 ms 一步） |
+| UP 长按 ≥3 s | 打开配网热点（重启；见 `docs/provisioning.md`） |
 
 长按阈值设为 600 ms（`BSP_BTN_LONG_PRESS_MS` 当前 500，改 600）。理由同 xz-02：**短按绝不能漏出载波**。
 

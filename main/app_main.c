@@ -22,6 +22,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -29,6 +30,7 @@
 extern TaskHandle_t s_audio_task_h;
 #include "mrrc_audio.h"
 #include "mrrc_net.h"
+#include "mrrc_prov.h"
 #include "mrrc_tx.h"
 #include "mrrc_ui.h"
 #include "nvs.h"
@@ -39,6 +41,11 @@ static const char *TAG = "mrrc";
 #define KEY_QUEUE_DEPTH 8
 #define KEYS_TASK_STACK 3072
 #define KEYS_TASK_PRIO  6
+
+/* One-shot "open setup on next boot" flag (NVS key, "mrrc" namespace) and the
+ * UP hold that arms it. */
+#define SETUP_FLAG_KEY "setup"
+#define SETUP_HOLD_US  3000000LL
 
 typedef struct {
     bsp_btn_t btn;
@@ -195,6 +202,43 @@ static void settings_store(void)
 
 /* Older callers used the volume-only name. */
 static void vol_store(void) { settings_store(); }
+
+/* ── setup-on-long-UP ─────────────────────────────────────────────────
+ * The setup AP costs ~15 KB (Wi-Fi driver + HTTP server) and cannot live
+ * alongside the STA/TLS stack on this part, so it is not "always on".  A 3 s
+ * UP hold arms the flag below and reboots; the next boot honours it *before*
+ * station mode claims the radio, so provisioning starts with the heap free. */
+static bool setup_armed(void)
+{
+    nvs_handle_t h;
+    int32_t v = 0;
+    if (nvs_open("mrrc", NVS_READONLY, &h) != ESP_OK) return false;
+    const bool armed = (nvs_get_i32(h, SETUP_FLAG_KEY, &v) == ESP_OK && v != 0);
+    nvs_close(h);
+    return armed;
+}
+
+static void setup_disarm(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("mrrc", NVS_READWRITE, &h) != ESP_OK) return;
+    (void)nvs_erase_key(h, SETUP_FLAG_KEY);
+    (void)nvs_commit(h);
+    nvs_close(h);
+}
+
+static void enter_setup(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("mrrc", NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_i32(h, SETUP_FLAG_KEY, 1);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+    ESP_LOGW(TAG, "UP held 3 s -> setup AP; rebooting");
+    vTaskDelay(pdMS_TO_TICKS(100));   /* let the log flush before reset */
+    esp_restart();
+}
 
 /* One step of whichever knob is active.  Shared by the single click and the
  * auto-repeat so both behave identically. */
@@ -399,6 +443,7 @@ static void keys_task(void *arg)
     int64_t tap_deadline = 0;          /* only used to recognise a 3rd tap */
     bsp_btn_t repeat_btn = BSP_BTN_UP;
     int64_t repeat_at = 0;
+    int64_t up_press_us = 0;           /* when UP went down, 0 = not held */
 
     for (;;) {
         TickType_t wait = portMAX_DELAY;
@@ -413,6 +458,12 @@ static void keys_task(void *arg)
 
         if (xQueueReceive(s_key_q, &e, wait) != pdTRUE) {
             if (repeat) {
+                /* Holding UP long enough is "open setup", not "keep sweeping". */
+                if (repeat_btn == BSP_BTN_UP && up_press_us &&
+                    esp_timer_get_time() - up_press_us >= SETUP_HOLD_US) {
+                    repeat = false;
+                    enter_setup();          /* arms flag + reboots; no return */
+                }
                 knob_step(repeat_btn);
                 repeat_at = esp_timer_get_time() + 90000;
             }
@@ -480,11 +531,13 @@ static void keys_task(void *arg)
         if (e.btn == BSP_BTN_UP || e.btn == BSP_BTN_DOWN) {
             if (e.ev == BSP_BTN_PRESS) {
                 const int64_t now_us = esp_timer_get_time();
+                if (e.btn == BSP_BTN_UP) up_press_us = now_us;
                 knob_step(e.btn);
                 repeat = true;
                 repeat_btn = e.btn;
                 repeat_at = now_us + 350000;   /* then repeat */
             } else if (e.ev == BSP_BTN_RELEASE) {
+                if (e.btn == BSP_BTN_UP) up_press_us = 0;
                 if (repeat) {
                     repeat = false;
                     settings_store();
@@ -593,6 +646,15 @@ void app_main(void)
     mrrc_ui_start();
     mrrc_ui_set_mode(s_ui_mode, s_spk_vol);
     bsp_audio_set_volume((uint8_t)s_spk_vol);
+
+    /* Honour a runtime "open setup" request before station mode claims the
+     * Wi-Fi driver and its heap.  mrrc_prov_run() never returns: the save page
+     * reboots back into station mode with the new credentials. */
+    if (setup_armed()) {
+        setup_disarm();
+        mrrc_prov_run();
+    }
+
     mrrc_net_start();
     mem_report("net started");
 

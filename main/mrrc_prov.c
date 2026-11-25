@@ -10,9 +10,11 @@
 // The passive NTAG213 on the case cannot carry data back, but it can carry the
 // URL, so tapping it can open the page once the phone has joined the AP.
 //
-// This runs only when there are no credentials at all, which means nothing else
-// has claimed the radio yet: the Wi-Fi/TLS stack that the audio path needs is
-// not up, so the ~15 KB this costs is affordable.
+// This runs when there are no credentials at all, or when the operator asks
+// for it at runtime with a 3 s UP hold (a one-shot NVS flag, honoured before
+// station mode starts).  Either way nothing else has claimed the radio yet: the
+// Wi-Fi/TLS stack that the audio path needs is not up, so the ~15 KB this costs
+// is affordable.
 #include <string.h>
 #include <stdlib.h>
 

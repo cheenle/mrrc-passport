@@ -123,3 +123,16 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # belongs here: a build from the defaults regressed it silently.
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
 CONFIG_HTTPD_MAX_URI_LEN=1024
+
+# --- TCP windows for a WAN link -------------------------------------------
+# lwIP defaults (and this project's 11520) are sized for a LAN. The C3 talks to
+# the server over IPv6 at ~90 ms RTT: the window caps the in-flight bytes, so a
+# small one makes the server accumulate its own send queue and every state
+# update — a frequency step's echo included — waits behind that backlog.
+# Measured on the touch pad (same link, same failure): 5760 B window -> 53 KB
+# stuck on the server, audio arriving at 47 of 50 fps, tune echo 0.6-2.2 s;
+# 16 KB -> 5.7 KB queue, 50 fps, echo 0.2-0.4 s.
+CONFIG_LWIP_TCP_WND_DEFAULT=16384
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64

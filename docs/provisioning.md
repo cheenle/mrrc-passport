@@ -10,7 +10,7 @@ is exactly one way for a phone to hand the device its settings: the device has t
 become the access point.
 
 ```
-no credentials, or two failed connection attempts
+no credentials, two failed connection attempts, or a 3 s UP hold
         │
         ├─ device raises SoftAP  "MRRC-Passport-XXXX"  (password mrrcconfig)
         ├─ DHCP serves 192.168.4.1
@@ -41,6 +41,7 @@ once the phone has joined the AP. It carries the address, never the data.
 |---|---|
 | no SSID at all | factory state |
 | two failed connection attempts, 30 s apart | the operator moved somewhere none of the configured networks exist |
+| UP held ≥3 s at any time | the operator wants to change Wi-Fi or server settings without rebuilding |
 
 The one-retry delay exists so a router that is merely rebooting does not drop the
 device into setup mode.

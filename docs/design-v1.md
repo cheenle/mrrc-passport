@@ -287,6 +287,7 @@ is 18 dB.
 | OK double-tap | cycle FREQ / VOL |
 | UP / DOWN tap | FREQ: ±1 kHz; VOL: speaker volume ±5% |
 | UP / DOWN held | auto-repeat (after 450 ms, one step every 120 ms) |
+| UP held ≥3 s | open the setup AP (reboots; see `docs/provisioning.md`) |
 
 The long-press threshold is 600 ms (`BSP_BTN_LONG_PRESS_MS` was 500; raise it to
 600). Same reason as xz-02: **a short tap must never emit carrier**.
